@@ -1,0 +1,93 @@
+# Kurukin Asset Hub
+
+Bootstrap independiente para el servicio `assets.kuruk.in`.
+
+## Requisitos
+
+- Ubuntu 24.04
+- Docker Swarm activo
+- Traefik desplegado como servicio Swarm
+- Red externa existente: `traefik_public`
+
+## Setup local del stack
+
+Copiar el archivo de ejemplo:
+
+```bash
+cp .env.example .env
+```
+
+Editar las variables antes de desplegar. Como mínimo, cambiar `POSTGRES_PASSWORD` y alinear `DATABASE_URL` con ese valor.
+
+```env
+POSTGRES_PASSWORD=una-password-fuerte
+DATABASE_URL=postgresql+psycopg://asset_hub:una-password-fuerte@db:5432/kurukin_asset_hub
+```
+
+## Build y deploy
+
+```bash
+make build
+set -a; . ./.env; set +a; docker stack deploy -c docker-compose.yml kurukin-asset-hub
+```
+
+También se puede usar:
+
+```bash
+make deploy
+```
+
+## Migraciones
+
+Cuando el stack esté levantado, ejecutar Alembic dentro de la red interna del stack:
+
+```bash
+docker run --rm --env-file .env --network kurukin-asset-hub_asset_hub_internal kurukin-asset-hub-web:bootstrap alembic upgrade head
+```
+
+O usar:
+
+```bash
+make migrate
+```
+
+## Health checks
+
+Probar el endpoint básico:
+
+```bash
+curl -I https://assets.kuruk.in/healthz
+curl https://assets.kuruk.in/healthz
+```
+
+Probar readiness con conexión real a PostgreSQL:
+
+```bash
+curl https://assets.kuruk.in/readyz
+```
+
+## Revisión de Traefik y servicios
+
+```bash
+docker service ls | grep kurukin-asset-hub
+docker service logs kurukin-asset-hub_web --tail 100
+docker service inspect traefik_traefik --format '{{json .Spec.TaskTemplate.Networks}}'
+docker network inspect traefik_public
+```
+
+Las labels de Traefik están en `deploy.labels`, como requiere Docker Swarm:
+
+```yaml
+traefik.enable: "true"
+traefik.docker.network: traefik_public
+traefik.http.routers.asset-hub.rule: Host(`assets.kuruk.in`)
+traefik.http.routers.asset-hub.entrypoints: websecure
+traefik.http.routers.asset-hub.tls.certresolver: le
+traefik.http.services.asset-hub.loadbalancer.server.port: "8000"
+```
+
+## Tests
+
+```bash
+make test
+```

@@ -1,0 +1,68 @@
+services:
+  web:
+    image: kurukin-asset-hub-web:bootstrap
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ASSET_HUB_HOST: ${ASSET_HUB_HOST:-assets.kuruk.in}
+      STACK_NAME: ${STACK_NAME:-kurukin-asset-hub}
+      POSTGRES_DB: ${POSTGRES_DB:-kurukin_asset_hub}
+      POSTGRES_USER: ${POSTGRES_USER:-asset_hub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://asset_hub:change-me@db:5432/kurukin_asset_hub}
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - asset_hub_internal
+      - traefik_public
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: traefik_public
+        traefik.http.routers.asset-hub.rule: Host(`assets.kuruk.in`)
+        traefik.http.routers.asset-hub.entrypoints: websecure
+        traefik.http.routers.asset-hub.tls.certresolver: le
+        traefik.http.services.asset-hub.loadbalancer.server.port: "8000"
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kurukin_asset_hub}
+      POSTGRES_USER: ${POSTGRES_USER:-asset_hub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - asset_hub_postgres_data:/var/lib/postgresql/data
+    networks:
+      - asset_hub_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+networks:
+  asset_hub_internal:
+    driver: overlay
+    attachable: true
+  traefik_public:
+    external: true
+
+volumes:
+  asset_hub_postgres_data:
