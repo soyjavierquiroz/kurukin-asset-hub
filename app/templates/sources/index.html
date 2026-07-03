@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="mb-6 flex items-center justify-between">
+    <h1 class="text-2xl font-semibold tracking-normal">Sources</h1>
+    <a class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" href="/sources/new">New source</a>
+  </div>
+
+  <div class="overflow-hidden rounded border border-zinc-200 bg-white">
+    <table class="w-full text-left text-sm">
+      <thead class="bg-zinc-100 text-xs uppercase tracking-normal text-zinc-500">
+        <tr>
+          <th class="px-4 py-3">Label</th>
+          <th class="px-4 py-3">Source ID</th>
+          <th class="px-4 py-3">Provider</th>
+          <th class="px-4 py-3">Root</th>
+          <th class="px-4 py-3">Enabled</th>
+          <th class="px-4 py-3"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-zinc-200">
+        {% for source in sources %}
+          <tr>
+            <td class="px-4 py-3 font-medium">{{ source.label }}</td>
+            <td class="px-4 py-3">{{ source.source_id }}</td>
+            <td class="px-4 py-3">{{ source.provider }}</td>
+            <td class="px-4 py-3">{{ source.root_path or "-" }}</td>
+            <td class="px-4 py-3">{{ source.enabled }}</td>
+            <td class="px-4 py-3 text-right"><a class="font-medium text-zinc-700 underline decoration-zinc-300 underline-offset-2" href="/sources/{{ source.id }}/edit">Edit</a></td>
+          </tr>
+        {% else %}
+          <tr><td class="px-4 py-8 text-center text-zinc-500" colspan="6">No sources found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-normal">Assets</h1>
+      <p class="mt-1 text-sm text-zinc-500">{{ total }} total</p>
+    </div>
+  </div>
+
+  <form class="mb-6 grid gap-3 rounded border border-zinc-200 bg-white p-4 md:grid-cols-4" method="get" hx-boost="true">
+    <label class="text-sm font-medium text-zinc-700">
+      Text
+      <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" type="search" name="q" value="{{ filters.q }}">
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Brand
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="brand_id">
+        <option value="">All</option>
+        {% for brand in brands %}
+          <option value="{{ brand.id }}" {% if filters.brand_id == brand.id %}selected{% endif %}>{{ brand.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Product
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="product_id">
+        <option value="">All</option>
+        {% for product in products %}
+          <option value="{{ product.id }}" {% if filters.product_id == product.id %}selected{% endif %}>{{ product.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Niche
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="niche_id">
+        <option value="">All</option>
+        {% for niche in niches %}
+          <option value="{{ niche.id }}" {% if filters.niche_id == niche.id %}selected{% endif %}>{{ niche.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Type
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="type">
+        <option value="">All</option>
+        {% for value in type_values %}
+          <option value="{{ value }}" {% if filters.type == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Orientation
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="orientation">
+        <option value="">All</option>
+        {% for value in orientation_values %}
+          <option value="{{ value }}" {% if filters.orientation == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Status
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="status">
+        <option value="">All</option>
+        {% for value in status_values %}
+          <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="flex items-end gap-2">
+      <button class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" type="submit">Filter</button>
+      <a class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" href="/assets">Reset</a>
+    </div>
+  </form>
+
+  <div class="overflow-hidden rounded border border-zinc-200 bg-white">
+    <table class="w-full min-w-[960px] text-left text-sm">
+      <thead class="bg-zinc-100 text-xs uppercase tracking-normal text-zinc-500">
+        <tr>
+          <th class="px-4 py-3">Asset</th>
+          <th class="px-4 py-3">Type</th>
+          <th class="px-4 py-3">Brand</th>
+          <th class="px-4 py-3">Product</th>
+          <th class="px-4 py-3">Orientation</th>
+          <th class="px-4 py-3">Status</th>
+          <th class="px-4 py-3">Source</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-zinc-200">
+        {% for asset in assets %}
+          <tr class="hover:bg-zinc-50">
+            <td class="px-4 py-3">
+              <a class="font-medium text-zinc-950 underline decoration-zinc-300 underline-offset-2" href="/assets/{{ asset.id }}">{{ asset.filename }}</a>
+              <div class="mt-1 max-w-xl truncate text-xs text-zinc-500">{{ asset.remote_path }}</div>
+            </td>
+            <td class="px-4 py-3">{{ asset.type }}</td>
+            <td class="px-4 py-3">{{ asset.brand.name if asset.brand else "-" }}</td>
+            <td class="px-4 py-3">{{ asset.product.name if asset.product else "-" }}</td>
+            <td class="px-4 py-3">{{ asset.orientation }}</td>
+            <td class="px-4 py-3">{{ asset.status }}</td>
+            <td class="px-4 py-3">{{ asset.source.label if asset.source else "-" }}</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td class="px-4 py-8 text-center text-zinc-500" colspan="7">No assets found.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="mt-4 flex items-center justify-between text-sm text-zinc-600">
+    <span>Page {{ page }} of {{ pages }}</span>
+    <div class="flex gap-2">
+      {% if page > 1 %}
+        <a class="rounded border border-zinc-300 px-3 py-2 hover:bg-zinc-100" href="?q={{ filters.q }}&brand_id={{ filters.brand_id or '' }}&product_id={{ filters.product_id or '' }}&niche_id={{ filters.niche_id or '' }}&type={{ filters.type }}&orientation={{ filters.orientation }}&status={{ filters.status }}&page={{ page - 1 }}">Previous</a>
+      {% endif %}
+      {% if page < pages %}
+        <a class="rounded border border-zinc-300 px-3 py-2 hover:bg-zinc-100" href="?q={{ filters.q }}&brand_id={{ filters.brand_id or '' }}&product_id={{ filters.product_id or '' }}&niche_id={{ filters.niche_id or '' }}&type={{ filters.type }}&orientation={{ filters.orientation }}&status={{ filters.status }}&page={{ page + 1 }}">Next</a>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}

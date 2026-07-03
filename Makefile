@@ -1,5 +1,5 @@
 STACK_NAME ?= kurukin-asset-hub
-WEB_IMAGE ?= kurukin-asset-hub-web:catalog-models
+WEB_IMAGE ?= kurukin-asset-hub-web:admin-ui
 WEB_SERVICE ?= $(STACK_NAME)_web
 
 .PHONY: build deploy rm logs ps shell migrate revision test
@@ -28,5 +28,5 @@ migrate:
 revision:
 	docker run --rm -it --env-file .env -v "$$(pwd)/alembic/versions:/app/alembic/versions" $(WEB_IMAGE) alembic revision --autogenerate -m "$(m)"
 
-test:
+test: build
 	docker run --rm $(WEB_IMAGE) pytest

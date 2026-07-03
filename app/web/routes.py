@@ -1,0 +1,488 @@
+import math
+import secrets
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy.orm import Session, selectinload
+
+from app.config import get_settings
+from app.db import get_db_session
+from app.models import Asset, Brand, Niche, Product, Source
+from app.models.asset import ASSET_STATUS_VALUES, ASSET_TYPE_VALUES, ORIENTATION_VALUES
+from app.models.common import PROVIDER_VALUES
+
+router = APIRouter(tags=["admin"])
+templates = Jinja2Templates(directory="app/templates")
+security = HTTPBasic()
+
+
+def require_admin(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> str:
+    settings = get_settings()
+    username_ok = secrets.compare_digest(credentials.username, settings.admin_username)
+    password_ok = secrets.compare_digest(credentials.password, settings.admin_password)
+    if not (username_ok and password_ok):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+
+AdminUser = Annotated[str, Depends(require_admin)]
+DbSession = Annotated[Session, Depends(get_db_session)]
+
+
+def clean_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def clean_bool(value: str | None) -> bool:
+    return value == "on"
+
+
+def clean_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    return int(value)
+
+
+def redirect_to(path: str) -> RedirectResponse:
+    return RedirectResponse(path, status_code=status.HTTP_303_SEE_OTHER)
+
+
+def get_or_404(session: Session, model: type[Brand] | type[Product] | type[Niche] | type[Source], item_id: int):
+    item = session.get(model, item_id)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return item
+
+
+@router.get("/")
+def dashboard(request: Request, _: AdminUser, session: DbSession):
+    counts = {
+        "assets": session.scalar(select(func.count()).select_from(Asset)) or 0,
+        "sources": session.scalar(select(func.count()).select_from(Source)) or 0,
+        "brands": session.scalar(select(func.count()).select_from(Brand)) or 0,
+        "products": session.scalar(select(func.count()).select_from(Product)) or 0,
+        "niches": session.scalar(select(func.count()).select_from(Niche)) or 0,
+    }
+    return templates.TemplateResponse(
+        request,
+        "dashboard.html",
+        {"page_title": "Dashboard", "counts": counts},
+    )
+
+
+@router.get("/assets")
+def assets_index(
+    request: Request,
+    _: AdminUser,
+    session: DbSession,
+    q: str | None = None,
+    brand_id: int | None = None,
+    product_id: int | None = None,
+    niche_id: int | None = None,
+    type: str | None = None,
+    orientation: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+):
+    page = max(page, 1)
+    per_page = 25
+    filters = []
+
+    if clean_text(q):
+        like = f"%{q.strip()}%"
+        filters.append(
+            or_(
+                Asset.asset_uid.ilike(like),
+                Asset.filename.ilike(like),
+                Asset.remote_path.ilike(like),
+                Asset.title.ilike(like),
+                Asset.description.ilike(like),
+            )
+        )
+    if brand_id:
+        filters.append(Asset.brand_id == brand_id)
+    if product_id:
+        filters.append(Asset.product_id == product_id)
+    if type:
+        filters.append(Asset.type == type)
+    if orientation:
+        filters.append(Asset.orientation == orientation)
+    if status:
+        filters.append(Asset.status == status)
+
+    query: Select[tuple[Asset]] = select(Asset).options(
+        selectinload(Asset.source),
+        selectinload(Asset.brand),
+        selectinload(Asset.product),
+        selectinload(Asset.niches),
+    )
+    count_query = select(func.count(func.distinct(Asset.id))).select_from(Asset)
+
+    if niche_id:
+        query = query.join(Asset.niches).where(Niche.id == niche_id)
+        count_query = count_query.join(Asset.niches).where(Niche.id == niche_id)
+    if filters:
+        query = query.where(and_(*filters))
+        count_query = count_query.where(and_(*filters))
+
+    total = session.scalar(count_query) or 0
+    assets = session.scalars(
+        query.order_by(Asset.created_at.desc(), Asset.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).all()
+    pages = max(math.ceil(total / per_page), 1)
+
+    return templates.TemplateResponse(
+        request,
+        "assets/index.html",
+        {
+            "page_title": "Assets",
+            "assets": assets,
+            "brands": session.scalars(select(Brand).order_by(Brand.name)).all(),
+            "products": session.scalars(select(Product).order_by(Product.name)).all(),
+            "niches": session.scalars(select(Niche).order_by(Niche.name)).all(),
+            "filters": {
+                "q": q or "",
+                "brand_id": brand_id,
+                "product_id": product_id,
+                "niche_id": niche_id,
+                "type": type or "",
+                "orientation": orientation or "",
+                "status": status or "",
+            },
+            "type_values": ASSET_TYPE_VALUES,
+            "orientation_values": ORIENTATION_VALUES,
+            "status_values": ASSET_STATUS_VALUES,
+            "page": page,
+            "pages": pages,
+            "total": total,
+        },
+    )
+
+
+@router.get("/assets/{asset_id}")
+def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSession):
+    asset = session.scalar(
+        select(Asset)
+        .where(Asset.id == asset_id)
+        .options(
+            selectinload(Asset.source),
+            selectinload(Asset.brand),
+            selectinload(Asset.product),
+            selectinload(Asset.niches),
+            selectinload(Asset.tags),
+            selectinload(Asset.usages),
+            selectinload(Asset.collections),
+        )
+    )
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    return templates.TemplateResponse(
+        request,
+        "assets/detail.html",
+        {"page_title": asset.filename, "asset": asset},
+    )
+
+
+@router.get("/sources")
+def sources_index(request: Request, _: AdminUser, session: DbSession):
+    sources = session.scalars(select(Source).order_by(Source.label)).all()
+    return templates.TemplateResponse(
+        request,
+        "sources/index.html",
+        {"page_title": "Sources", "sources": sources},
+    )
+
+
+@router.get("/sources/new")
+def sources_new(request: Request, _: AdminUser):
+    return templates.TemplateResponse(
+        request,
+        "sources/form.html",
+        {"page_title": "New source", "source": None, "provider_values": PROVIDER_VALUES},
+    )
+
+
+@router.post("/sources")
+def sources_create(
+    _: AdminUser,
+    session: DbSession,
+    source_id: Annotated[str, Form()],
+    provider: Annotated[str, Form()],
+    label: Annotated[str, Form()],
+    rclone_remote: Annotated[str | None, Form()] = None,
+    root_path: Annotated[str | None, Form()] = None,
+    enabled: Annotated[str | None, Form()] = None,
+):
+    session.add(
+        Source(
+            source_id=source_id.strip(),
+            provider=provider,
+            label=label.strip(),
+            rclone_remote=clean_text(rclone_remote),
+            root_path=clean_text(root_path),
+            enabled=clean_bool(enabled),
+        )
+    )
+    session.commit()
+    return redirect_to("/sources")
+
+
+@router.get("/sources/{source_id}/edit")
+def sources_edit(request: Request, source_id: int, _: AdminUser, session: DbSession):
+    source = get_or_404(session, Source, source_id)
+    return templates.TemplateResponse(
+        request,
+        "sources/form.html",
+        {"page_title": f"Edit {source.label}", "source": source, "provider_values": PROVIDER_VALUES},
+    )
+
+
+@router.post("/sources/{source_id}/edit")
+def sources_update(
+    source_id: int,
+    _: AdminUser,
+    session: DbSession,
+    public_source_id: Annotated[str, Form(alias="source_id")],
+    provider: Annotated[str, Form()],
+    label: Annotated[str, Form()],
+    rclone_remote: Annotated[str | None, Form()] = None,
+    root_path: Annotated[str | None, Form()] = None,
+    enabled: Annotated[str | None, Form()] = None,
+):
+    source = get_or_404(session, Source, source_id)
+    source.source_id = public_source_id.strip()
+    source.provider = provider
+    source.label = label.strip()
+    source.rclone_remote = clean_text(rclone_remote)
+    source.root_path = clean_text(root_path)
+    source.enabled = clean_bool(enabled)
+    session.commit()
+    return redirect_to("/sources")
+
+
+@router.get("/brands")
+def brands_index(request: Request, _: AdminUser, session: DbSession):
+    brands = session.scalars(select(Brand).order_by(Brand.name)).all()
+    return templates.TemplateResponse(
+        request,
+        "brands/index.html",
+        {"page_title": "Brands", "brands": brands},
+    )
+
+
+@router.get("/brands/new")
+def brands_new(request: Request, _: AdminUser):
+    return templates.TemplateResponse(
+        request,
+        "brands/form.html",
+        {"page_title": "New brand", "brand": None},
+    )
+
+
+@router.post("/brands")
+def brands_create(
+    _: AdminUser,
+    session: DbSession,
+    slug: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    description: Annotated[str | None, Form()] = None,
+    visual_line: Annotated[str | None, Form()] = None,
+    enabled: Annotated[str | None, Form()] = None,
+):
+    session.add(
+        Brand(
+            slug=slug.strip(),
+            name=name.strip(),
+            description=clean_text(description),
+            visual_line=clean_text(visual_line),
+            enabled=clean_bool(enabled),
+        )
+    )
+    session.commit()
+    return redirect_to("/brands")
+
+
+@router.get("/brands/{brand_id}/edit")
+def brands_edit(request: Request, brand_id: int, _: AdminUser, session: DbSession):
+    brand = get_or_404(session, Brand, brand_id)
+    return templates.TemplateResponse(
+        request,
+        "brands/form.html",
+        {"page_title": f"Edit {brand.name}", "brand": brand},
+    )
+
+
+@router.post("/brands/{brand_id}/edit")
+def brands_update(
+    brand_id: int,
+    _: AdminUser,
+    session: DbSession,
+    slug: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    description: Annotated[str | None, Form()] = None,
+    visual_line: Annotated[str | None, Form()] = None,
+    enabled: Annotated[str | None, Form()] = None,
+):
+    brand = get_or_404(session, Brand, brand_id)
+    brand.slug = slug.strip()
+    brand.name = name.strip()
+    brand.description = clean_text(description)
+    brand.visual_line = clean_text(visual_line)
+    brand.enabled = clean_bool(enabled)
+    session.commit()
+    return redirect_to("/brands")
+
+
+@router.get("/products")
+def products_index(request: Request, _: AdminUser, session: DbSession):
+    products = session.scalars(
+        select(Product).options(selectinload(Product.brand)).order_by(Product.name)
+    ).all()
+    return templates.TemplateResponse(
+        request,
+        "products/index.html",
+        {"page_title": "Products", "products": products},
+    )
+
+
+@router.get("/products/new")
+def products_new(request: Request, _: AdminUser, session: DbSession):
+    return templates.TemplateResponse(
+        request,
+        "products/form.html",
+        {
+            "page_title": "New product",
+            "product": None,
+            "brands": session.scalars(select(Brand).order_by(Brand.name)).all(),
+        },
+    )
+
+
+@router.post("/products")
+def products_create(
+    _: AdminUser,
+    session: DbSession,
+    brand_id: Annotated[int, Form()],
+    slug: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    description: Annotated[str | None, Form()] = None,
+    enabled: Annotated[str | None, Form()] = None,
+):
+    session.add(
+        Product(
+            brand_id=brand_id,
+            slug=slug.strip(),
+            name=name.strip(),
+            description=clean_text(description),
+            enabled=clean_bool(enabled),
+        )
+    )
+    session.commit()
+    return redirect_to("/products")
+
+
+@router.get("/products/{product_id}/edit")
+def products_edit(request: Request, product_id: int, _: AdminUser, session: DbSession):
+    product = get_or_404(session, Product, product_id)
+    return templates.TemplateResponse(
+        request,
+        "products/form.html",
+        {
+            "page_title": f"Edit {product.name}",
+            "product": product,
+            "brands": session.scalars(select(Brand).order_by(Brand.name)).all(),
+        },
+    )
+
+
+@router.post("/products/{product_id}/edit")
+def products_update(
+    product_id: int,
+    _: AdminUser,
+    session: DbSession,
+    brand_id: Annotated[int, Form()],
+    slug: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    description: Annotated[str | None, Form()] = None,
+    enabled: Annotated[str | None, Form()] = None,
+):
+    product = get_or_404(session, Product, product_id)
+    product.brand_id = brand_id
+    product.slug = slug.strip()
+    product.name = name.strip()
+    product.description = clean_text(description)
+    product.enabled = clean_bool(enabled)
+    session.commit()
+    return redirect_to("/products")
+
+
+@router.get("/niches")
+def niches_index(request: Request, _: AdminUser, session: DbSession):
+    niches = session.scalars(select(Niche).order_by(Niche.name)).all()
+    return templates.TemplateResponse(
+        request,
+        "niches/index.html",
+        {"page_title": "Niches", "niches": niches},
+    )
+
+
+@router.get("/niches/new")
+def niches_new(request: Request, _: AdminUser):
+    return templates.TemplateResponse(
+        request,
+        "niches/form.html",
+        {"page_title": "New niche", "niche": None},
+    )
+
+
+@router.post("/niches")
+def niches_create(
+    _: AdminUser,
+    session: DbSession,
+    slug: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    description: Annotated[str | None, Form()] = None,
+):
+    session.add(Niche(slug=slug.strip(), name=name.strip(), description=clean_text(description)))
+    session.commit()
+    return redirect_to("/niches")
+
+
+@router.get("/niches/{niche_id}/edit")
+def niches_edit(request: Request, niche_id: int, _: AdminUser, session: DbSession):
+    niche = get_or_404(session, Niche, niche_id)
+    return templates.TemplateResponse(
+        request,
+        "niches/form.html",
+        {"page_title": f"Edit {niche.name}", "niche": niche},
+    )
+
+
+@router.post("/niches/{niche_id}/edit")
+def niches_update(
+    niche_id: int,
+    _: AdminUser,
+    session: DbSession,
+    slug: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    description: Annotated[str | None, Form()] = None,
+):
+    niche = get_or_404(session, Niche, niche_id)
+    niche.slug = slug.strip()
+    niche.name = name.strip()
+    niche.description = clean_text(description)
+    session.commit()
+    return redirect_to("/niches")

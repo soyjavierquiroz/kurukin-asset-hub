@@ -22,6 +22,8 @@ Editar las variables antes de desplegar. Como mínimo, cambiar `POSTGRES_PASSWOR
 ```env
 POSTGRES_PASSWORD=una-password-fuerte
 DATABASE_URL=postgresql+psycopg://asset_hub:una-password-fuerte@db:5432/kurukin_asset_hub
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=otra-password-fuerte
 ```
 
 ## Build y deploy
@@ -42,7 +44,7 @@ make deploy
 Cuando el stack esté levantado, ejecutar Alembic dentro de la red interna del stack:
 
 ```bash
-docker run --rm --env-file .env --network kurukin-asset-hub_asset_hub_internal kurukin-asset-hub-web:catalog-models alembic upgrade head
+docker run --rm --env-file .env --network kurukin-asset-hub_asset_hub_internal kurukin-asset-hub-web:admin-ui alembic upgrade head
 ```
 
 O usar:
@@ -73,6 +75,19 @@ El catálogo inicial vive en modelos SQLAlchemy 2.x bajo `app/models/` y se publ
 `AuthProfile` guarda sólo metadata operativa y referencias como `secret_ref`; no guarda credenciales reales, tokens ni secretos. `Asset` referencia a `Source`, y `Source` puede apuntar a un `AuthProfile`, pero los assets nunca contienen credenciales.
 
 `Asset` también conserva campos de transformación como flip, crop, zoom, speed change, reverse y color grade. Esos flags permiten escoger variaciones visuales sin repetir assets de forma innecesaria ni asumir transformaciones inseguras para una pieza.
+
+## Admin UI
+
+La UI interna vive en `/` y está renderizada con FastAPI, Jinja2, HTMX y Tailwind CDN. Permite revisar conteos del catálogo, filtrar assets, ver detalle técnico/editorial/transformación/seguridad y administrar sources, brands, products y niches con formularios server-rendered.
+
+Las rutas web admin usan Basic Auth simple. Configurar estas variables en `.env` antes de publicar:
+
+```env
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=otra-password-fuerte
+```
+
+`/healthz` y `/readyz` permanecen públicos para health checks y readiness externos.
 
 ## Revisión de Traefik y servicios
 

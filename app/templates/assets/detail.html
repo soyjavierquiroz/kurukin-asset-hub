@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% macro value(label, content) %}
+  <div class="border-b border-zinc-100 py-3">
+    <dt class="text-xs font-semibold uppercase tracking-normal text-zinc-500">{{ label }}</dt>
+    <dd class="mt-1 break-words text-sm text-zinc-900">{{ content if content is not none and content != "" else "-" }}</dd>
+  </div>
+{% endmacro %}
+
+{% block content %}
+  <div class="mb-6">
+    <a class="text-sm font-medium text-zinc-600 hover:text-zinc-950" href="/assets">Back to assets</a>
+    <h1 class="mt-3 text-2xl font-semibold tracking-normal">{{ asset.filename }}</h1>
+    <p class="mt-1 break-words text-sm text-zinc-500">{{ asset.remote_path }}</p>
+  </div>
+
+  <div class="grid gap-6 lg:grid-cols-2">
+    <section class="rounded border border-zinc-200 bg-white p-5">
+      <h2 class="text-lg font-semibold tracking-normal">Technical</h2>
+      <dl class="mt-3">
+        {{ value("UID", asset.asset_uid) }}
+        {{ value("Provider", asset.provider) }}
+        {{ value("Source", asset.source.label if asset.source else none) }}
+        {{ value("Rclone remote", asset.rclone_remote) }}
+        {{ value("Source path", asset.source_path) }}
+        {{ value("Drive file ID", asset.drive_file_id) }}
+        {{ value("MIME type", asset.mime_type) }}
+        {{ value("Type", asset.type) }}
+        {{ value("Orientation", asset.orientation) }}
+        {{ value("Dimensions", (asset.width|string) ~ " x " ~ (asset.height|string) if asset.width and asset.height else none) }}
+        {{ value("Duration seconds", asset.duration_seconds) }}
+        {{ value("Size bytes", asset.size_bytes) }}
+        {{ value("Checksum", asset.checksum) }}
+      </dl>
+    </section>
+
+    <section class="rounded border border-zinc-200 bg-white p-5">
+      <h2 class="text-lg font-semibold tracking-normal">Editorial</h2>
+      <dl class="mt-3">
+        {{ value("Title", asset.title) }}
+        {{ value("Description", asset.description) }}
+        {{ value("Visual description", asset.visual_description) }}
+        {{ value("Action description", asset.action_description) }}
+        {{ value("Emotion", asset.emotion) }}
+        {{ value("People", asset.people) }}
+        {{ value("Location", asset.location) }}
+        {{ value("Best for", asset.best_for) }}
+        {{ value("Avoid for", asset.avoid_for) }}
+        {{ value("Brand", asset.brand.name if asset.brand else none) }}
+        {{ value("Product", asset.product.name if asset.product else none) }}
+        {{ value("Niches", asset.niches | map(attribute="name") | join(", ")) }}
+      </dl>
+    </section>
+
+    <section class="rounded border border-zinc-200 bg-white p-5">
+      <h2 class="text-lg font-semibold tracking-normal">Transformation</h2>
+      <dl class="mt-3">
+        {{ value("Flip horizontal", asset.flip_horizontal_allowed) }}
+        {{ value("Flip vertical", asset.flip_vertical_allowed) }}
+        {{ value("Crop", asset.crop_allowed) }}
+        {{ value("Zoom", asset.zoom_allowed) }}
+        {{ value("Speed change", asset.speed_change_allowed) }}
+        {{ value("Reverse", asset.reverse_allowed) }}
+        {{ value("Color grade", asset.color_grade_allowed) }}
+        {{ value("Shot type", asset.shot_type) }}
+        {{ value("Camera motion", asset.camera_motion) }}
+        {{ value("Subject position", asset.subject_position) }}
+        {{ value("Visual energy", asset.visual_energy) }}
+        {{ value("Pacing", asset.pacing) }}
+        {{ value("Best scene role", asset.best_scene_role) }}
+        {{ value("Loopable", asset.loopable) }}
+      </dl>
+    </section>
+
+    <section class="rounded border border-zinc-200 bg-white p-5">
+      <h2 class="text-lg font-semibold tracking-normal">Safety</h2>
+      <dl class="mt-3">
+        {{ value("Visible text", asset.has_visible_text) }}
+        {{ value("Text", asset.visible_text) }}
+        {{ value("Text language", asset.text_language) }}
+        {{ value("Has logo", asset.has_logo) }}
+        {{ value("Has watermark", asset.has_watermark) }}
+        {{ value("Has faces", asset.has_faces) }}
+        {{ value("Has hands", asset.has_hands) }}
+        {{ value("Has product", asset.has_product) }}
+        {{ value("Directional motion", asset.has_directional_motion) }}
+        {{ value("Safe for subtitles", asset.safe_for_subtitles) }}
+        {{ value("Safe for text overlay", asset.safe_for_text_overlay) }}
+        {{ value("Overlay safe area", asset.overlay_safe_area) }}
+        {{ value("Status", asset.status) }}
+      </dl>
+    </section>
+  </div>
+{% endblock %}

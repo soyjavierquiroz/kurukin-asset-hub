@@ -1,6 +1,6 @@
 services:
   web:
-    image: kurukin-asset-hub-web:catalog-models
+    image: kurukin-asset-hub-web:admin-ui
     build:
       context: .
       dockerfile: Dockerfile
@@ -11,6 +11,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-asset_hub}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://asset_hub:change-me@db:5432/kurukin_asset_hub}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     networks:

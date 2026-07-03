@@ -16,6 +16,8 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://asset_hub:change-me@db:5432/kurukin_asset_hub",
         alias="DATABASE_URL",
     )
+    admin_username: str = Field(default="admin", alias="ADMIN_USERNAME")
+    admin_password: str = Field(default="change-me", alias="ADMIN_PASSWORD")
     app_env: str = Field(default="production", alias="APP_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
