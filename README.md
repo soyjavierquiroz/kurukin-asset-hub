@@ -89,6 +89,48 @@ ADMIN_PASSWORD=otra-password-fuerte
 
 `/healthz` y `/readyz` permanecen públicos para health checks y readiness externos.
 
+## Indexing assets with rclone
+
+El indexador MVP lee metadata con `rclone lsjson` y crea o actualiza assets en PostgreSQL sin descargar archivos. No guarda credenciales de rclone en `sources` ni en `assets`; la configuración queda fuera del servicio y se monta sólo al ejecutar el script.
+
+Requisito: tener un `rclone.conf` válido en el host y confirmar el nombre del remote:
+
+```bash
+rclone listremotes
+```
+
+Ejemplo local:
+
+```bash
+python scripts/index_rclone_source.py \
+  --source-id drive_mujer_no_escribas \
+  --remote gdrive_mne \
+  --root "Assets Mujer No Escribas" \
+  --brand mujer_no_escribas \
+  --product metodo_pausa \
+  --default-niche relaciones
+```
+
+Ejemplo Docker con `rclone.conf` montado read-only:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network kurukin-asset-hub_asset_hub_internal \
+  -v /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro \
+  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
+  kurukin-asset-hub-web:rclone-indexer \
+  python scripts/index_rclone_source.py \
+    --source-id drive_mujer_no_escribas \
+    --remote gdrive_mne \
+    --root "Assets Mujer No Escribas" \
+    --brand mujer_no_escribas \
+    --product metodo_pausa \
+    --default-niche relaciones
+```
+
+Los assets se deduplican por `source + remote_path`; si un archivo ya existe para esa fuente, el indexador actualiza metadata como filename, extensión, tamaño, remote y fecha de indexado. El servicio web no monta `rclone.conf` por defecto y no falla si ese archivo no existe.
+
 ## Revisión de Traefik y servicios
 
 ```bash
