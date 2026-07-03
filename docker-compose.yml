@@ -1,6 +1,6 @@
 services:
   web:
-    image: kurukin-asset-hub-web:bootstrap
+    image: kurukin-asset-hub-web:catalog-models
     build:
       context: .
       dockerfile: Dockerfile

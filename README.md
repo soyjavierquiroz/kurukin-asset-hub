@@ -42,7 +42,7 @@ make deploy
 Cuando el stack esté levantado, ejecutar Alembic dentro de la red interna del stack:
 
 ```bash
-docker run --rm --env-file .env --network kurukin-asset-hub_asset_hub_internal kurukin-asset-hub-web:bootstrap alembic upgrade head
+docker run --rm --env-file .env --network kurukin-asset-hub_asset_hub_internal kurukin-asset-hub-web:catalog-models alembic upgrade head
 ```
 
 O usar:
@@ -65,6 +65,14 @@ Probar readiness con conexión real a PostgreSQL:
 ```bash
 curl https://assets.kuruk.in/readyz
 ```
+
+## Catalog data model
+
+El catálogo inicial vive en modelos SQLAlchemy 2.x bajo `app/models/` y se publica con Alembic. Incluye fuentes, perfiles de autenticación, marcas, productos, nichos, colecciones, assets, tags, usos y bundles de trabajo.
+
+`AuthProfile` guarda sólo metadata operativa y referencias como `secret_ref`; no guarda credenciales reales, tokens ni secretos. `Asset` referencia a `Source`, y `Source` puede apuntar a un `AuthProfile`, pero los assets nunca contienen credenciales.
+
+`Asset` también conserva campos de transformación como flip, crop, zoom, speed change, reverse y color grade. Esos flags permiten escoger variaciones visuales sin repetir assets de forma innecesaria ni asumir transformaciones inseguras para una pieza.
 
 ## Revisión de Traefik y servicios
 
