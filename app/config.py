@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     ai_enrichment_enabled: bool = Field(default=False, alias="AI_ENRICHMENT_ENABLED")
     ai_provider: str = Field(default="openai", alias="AI_PROVIDER")
     ai_model: str | None = Field(default=None, alias="AI_MODEL")
+    ai_output_language: str = Field(default="es", alias="AI_OUTPUT_LANGUAGE")
     ai_frame_sample_count: int = Field(default=8, ge=1, le=30, alias="AI_FRAME_SAMPLE_COUNT")
     ai_review_threshold: float = Field(default=0.72, ge=0.0, le=1.0, alias="AI_REVIEW_THRESHOLD")
     ai_max_assets_per_batch: int = Field(default=20, ge=1, le=200, alias="AI_MAX_ASSETS_PER_BATCH")

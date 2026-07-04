@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from app.config import get_settings
 from app.models import Asset
 
 ASSET_ENRICHMENT_PROMPT_VERSION = "asset_enrichment_v1"
 
 
 def build_asset_enrichment_prompt(asset: Asset) -> str:
+    output_language = get_settings().ai_output_language or "es"
     return f"""
 Analiza este asset como parte de una biblioteca para creacion automatica de videos.
 Devuelve solo JSON valido compatible con el schema solicitado.
@@ -20,6 +22,17 @@ Objetivo:
 - No inventes marca, producto, ubicacion, cultura o personas si no hay evidencia visual.
 - No decidas permisos de marca, producto, usage_scope ni rights_status; eso lo hacen las policies.
 - Si hay duda, baja confidence y marca needs_human_review con review_reason claro.
+
+Idioma de salida:
+- output_language: {output_language}
+- Responde en español neutro.
+- Todos los campos de texto libre deben estar en español.
+- Todas las keywords deben estar en español, salvo nombres propios o términos de marca.
+- No mezcles inglés y español.
+- Mantén los valores enum exactamente como se definen en el schema, aunque estén en inglés.
+- Los campos search_text y embedding_text deben estar en español, con sinónimos útiles para búsqueda.
+- No traduzcas nombres propios como Veyra o Grandiosa Mujer.
+- Existing analyses no se migran automaticamente; para regenerar en español hay que correr --force.
 
 Contexto conocido del catalogo:
 - asset_id: {asset.id}

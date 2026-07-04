@@ -20,6 +20,7 @@ from app.main import create_app
 from app.models import Asset, AssetAIAnalysis, AssetKeyword, Source
 from app.schemas.ai_enrichment import AIAssetEnrichmentResult, build_openai_strict_json_schema
 from app.services import ai_asset_enrichment
+from app.services.ai_prompts import build_asset_enrichment_prompt
 from app.services.ai_providers import openai_provider
 from app.services.ai_asset_enrichment import AssetImageInputs, enrich_asset_with_ai
 
@@ -185,6 +186,31 @@ def test_ai_schema_rejects_invalid_result() -> None:
         AIAssetEnrichmentResult.model_validate(valid_ai_payload(shot_type="macro"))
 
 
+def test_ai_prompt_requests_spanish_output() -> None:
+    client, session_factory = make_test_client()
+    del client
+    with session_factory() as session:
+        asset = seed_asset(session)
+
+        prompt = build_asset_enrichment_prompt(asset)
+
+    assert "Responde en español neutro." in prompt
+    assert "Todos los campos de texto libre deben estar en español." in prompt
+    assert "Todas las keywords deben estar en español" in prompt
+
+
+def test_ai_prompt_keeps_enum_values_exact() -> None:
+    client, session_factory = make_test_client()
+    del client
+    with session_factory() as session:
+        asset = seed_asset(session)
+
+        prompt = build_asset_enrichment_prompt(asset)
+
+    assert "Mantén los valores enum exactamente como se definen en el schema" in prompt
+    assert "aunque estén en inglés" in prompt
+
+
 def test_openai_strict_schema_root_requires_all_properties() -> None:
     schema = build_openai_strict_json_schema(AIAssetEnrichmentResult)
 
@@ -298,6 +324,66 @@ def test_enrich_asset_applies_metadata_flags_keywords_and_analysis(
         analysis = session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset.id))
         assert analysis is not None
         assert analysis.result_json["visual_description"] == enriched.visual_description
+
+
+def test_ai_keywords_default_to_spanish_when_language_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_ai(monkeypatch)
+    mock_inputs(monkeypatch)
+    monkeypatch.setenv("AI_OUTPUT_LANGUAGE", "es")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        ai_asset_enrichment,
+        "call_openai_vision",
+        lambda prompt, paths: AIAssetEnrichmentResult.model_validate(
+            valid_ai_payload(
+                keywords=[
+                    {
+                        "keyword": "Mujer",
+                        "category": "subject",
+                        "weight": 1.0,
+                        "confidence": 0.9,
+                        "language": None,
+                    },
+                    {
+                        "keyword": "Sonrisa",
+                        "category": "mood",
+                        "weight": 0.8,
+                        "confidence": 0.88,
+                        "language": "",
+                    },
+                ]
+            )
+        ),
+    )
+    client, session_factory = make_test_client()
+    del client
+
+    with session_factory() as session:
+        asset = seed_asset(session)
+        session.add(
+            AssetKeyword(
+                asset=asset,
+                keyword="manual keeper",
+                category="concept",
+                weight=1.0,
+                confidence=1.0,
+                source="manual",
+                language="und",
+            )
+        )
+        session.commit()
+
+        enrich_asset_with_ai(session, asset.id, force=True)
+        keywords = session.scalars(select(AssetKeyword).where(AssetKeyword.asset_id == asset.id)).all()
+
+        ai_languages = {
+            keyword.keyword: keyword.language for keyword in keywords if keyword.source == "ai"
+        }
+        manual_keyword = next(keyword for keyword in keywords if keyword.source == "manual")
+        assert ai_languages == {"mujer": "es", "sonrisa": "es"}
+        assert manual_keyword.language == "und"
 
 
 def test_force_replaces_ai_keywords_and_preserves_manual(
@@ -419,6 +505,74 @@ def test_ui_detail_shows_ai_section() -> None:
     assert response.status_code == 200
     assert "AI Enrichment" in response.text
     assert "Run AI Enrichment" in response.text
+
+
+def test_ui_list_shows_review_badge_and_ai_status_near_filename() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        review_asset = seed_asset(session, uid="review_asset")
+        review_asset.ai_enrichment_status = "needs_review"
+        review_asset.ai_enrichment_confidence = 0.63
+        review_asset.needs_human_review = True
+        review_asset.review_reason = "Texto visible ambiguo"
+        session.commit()
+
+    response = client.get("/assets", headers=auth_header())
+
+    assert response.status_code == 200
+    html = response.text
+    filename_index = html.index("review_asset.jpg")
+    asset_row_start = filename_index
+    asset_row_end = filename_index + 1200
+    asset_row = html[asset_row_start:asset_row_end]
+    assert "Revisar" in asset_row
+    assert "AI needs_review" in asset_row
+    assert "AI 0.63" in asset_row
+    assert "Texto visible ambiguo" in html
+
+
+def test_ui_detail_shows_review_reason_panel() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        asset = seed_asset(session, uid="detail_review_asset")
+        asset.ai_enrichment_status = "needs_review"
+        asset.ai_enrichment_confidence = 0.61
+        asset.needs_human_review = True
+        asset.review_reason = "Logo visible requiere validacion"
+        session.commit()
+
+    response = client.get(f"/assets/{asset.id}", headers=auth_header())
+
+    assert response.status_code == 200
+    assert "Needs review" in response.text
+    assert "Logo visible requiere validacion" in response.text
+    assert "AI 0.61" in response.text
+
+
+def test_ui_needs_review_filters_true_false() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        review_asset = seed_asset(session, uid="needs_review_true")
+        review_asset.needs_human_review = True
+        review_asset.ai_enrichment_status = "needs_review"
+        ready_asset = seed_asset(session, uid="needs_review_false")
+        ready_asset.needs_human_review = False
+        ready_asset.ai_enrichment_status = "ready"
+        session.commit()
+
+    true_response = client.get("/assets?needs_review=true", headers=auth_header())
+    false_response = client.get("/assets?needs_review=false", headers=auth_header())
+    all_response = client.get("/assets", headers=auth_header())
+
+    assert true_response.status_code == 200
+    assert "needs_review_true.jpg" in true_response.text
+    assert "needs_review_false.jpg" not in true_response.text
+    assert false_response.status_code == 200
+    assert "needs_review_false.jpg" in false_response.text
+    assert "needs_review_true.jpg" not in false_response.text
+    assert all_response.status_code == 200
+    assert "needs_review_true.jpg" in all_response.text
+    assert "needs_review_false.jpg" in all_response.text
 
 
 def test_ai_routes_require_auth_and_api_key() -> None:

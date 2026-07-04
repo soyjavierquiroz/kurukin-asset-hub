@@ -252,12 +252,13 @@ def upsert_ai_keywords(
         for keyword in existing
         if keyword.source != "ai"
     }
+    default_language = get_settings().ai_output_language
 
     for item in result.keywords:
         keyword = normalize_keyword(item.keyword)
         if not keyword:
             continue
-        language = normalize_language(item.language)
+        language = normalize_language(item.language, default_language=default_language)
         key = (keyword, item.category, language)
         if key in manual_keys:
             continue
@@ -349,9 +350,10 @@ def normalize_keyword(value: str) -> str:
     return cleaned[:160]
 
 
-def normalize_language(value: str | None) -> str:
-    cleaned = (value or "und").strip().lower()
-    return cleaned[:16] or "und"
+def normalize_language(value: str | None, default_language: str = "und") -> str:
+    cleaned_default = (default_language or "und").strip().lower() or "und"
+    cleaned = (value or cleaned_default).strip().lower()
+    return cleaned[:16] or cleaned_default[:16] or "und"
 
 
 def sanitize_ai_error(message: str) -> str:

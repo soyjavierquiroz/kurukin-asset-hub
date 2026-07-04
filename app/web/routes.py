@@ -179,6 +179,7 @@ def assets_index(
         count_query = count_query.where(and_(*filters))
 
     total = session.scalar(count_query) or 0
+    needs_review_count = session.scalar(count_query.where(Asset.needs_human_review.is_(True))) or 0
     assets = session.scalars(
         query.order_by(Asset.created_at.desc(), Asset.id.desc())
         .offset((page - 1) * per_page)
@@ -233,6 +234,7 @@ def assets_index(
             "page": page,
             "pages": pages,
             "total": total,
+            "needs_review_count": needs_review_count,
         },
     )
 

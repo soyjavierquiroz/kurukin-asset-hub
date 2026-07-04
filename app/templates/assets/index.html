@@ -1,10 +1,29 @@
 {% extends "base.html" %}
 
+{% macro ai_status_badge(asset) %}
+  {% if asset.ai_enrichment_status == "failed" %}
+    <span class="inline-flex rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">AI failed</span>
+  {% elif asset.ai_enrichment_status == "ready" %}
+    <span class="inline-flex rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">AI ready</span>
+  {% elif asset.ai_enrichment_status == "needs_review" %}
+    <span class="inline-flex rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">AI needs_review</span>
+  {% elif asset.ai_enrichment_status == "processing" %}
+    <span class="inline-flex rounded border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700">AI processing</span>
+  {% elif asset.ai_enrichment_status == "skipped" %}
+    <span class="inline-flex rounded border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs font-semibold text-zinc-600">AI skipped</span>
+  {% else %}
+    <span class="inline-flex rounded border border-zinc-200 bg-white px-2 py-1 text-xs font-semibold text-zinc-600">AI pending</span>
+  {% endif %}
+{% endmacro %}
+
 {% block content %}
   <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
     <div>
       <h1 class="text-2xl font-semibold tracking-normal">Assets</h1>
-      <p class="mt-1 text-sm text-zinc-500">{{ total }} total</p>
+      <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-zinc-500">
+        <span>{{ total }} total</span>
+        <span class="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800">Needs review: {{ needs_review_count }}</span>
+      </p>
     </div>
   </div>
 
@@ -144,7 +163,7 @@
       </thead>
       <tbody class="divide-y divide-zinc-200">
         {% for asset in assets %}
-          <tr class="hover:bg-zinc-50">
+          <tr class="{{ 'bg-amber-50 hover:bg-amber-100' if asset.needs_human_review else 'hover:bg-zinc-50' }}">
             <td class="px-4 py-3">
               <input class="h-4 w-4 rounded border-zinc-300" type="checkbox" name="asset_ids" value="{{ asset.id }}">
             </td>
@@ -157,6 +176,20 @@
             </td>
             <td class="px-4 py-3">
               <a class="font-medium text-zinc-950 underline decoration-zinc-300 underline-offset-2" href="/assets/{{ asset.id }}">{{ asset.filename }}</a>
+              <div class="mt-2 flex max-w-xl flex-wrap items-center gap-1.5">
+                {{ ai_status_badge(asset) }}
+                {% if asset.needs_human_review %}
+                  <span class="inline-flex rounded border border-amber-300 bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-900" title="{{ asset.review_reason or 'Requiere revision humana' }}">Revisar</span>
+                {% endif %}
+                {% if asset.ai_enrichment_confidence is not none %}
+                  <span class="inline-flex rounded border border-zinc-200 bg-white px-2 py-1 text-xs font-medium text-zinc-700">AI {{ "%.2f"|format(asset.ai_enrichment_confidence) }}</span>
+                {% endif %}
+                {% if asset.ai_enrichment_status == "failed" and asset.ai_error %}
+                  <span class="max-w-xs truncate rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700" title="{{ asset.ai_error }}">{{ asset.ai_error }}</span>
+                {% elif asset.needs_human_review and asset.review_reason %}
+                  <span class="max-w-xs truncate rounded border border-amber-200 bg-white px-2 py-1 text-xs text-amber-800" title="{{ asset.review_reason }}">{{ asset.review_reason }}</span>
+                {% endif %}
+              </div>
               <div class="mt-1 max-w-xl truncate text-xs text-zinc-500">{{ asset.remote_path }}</div>
             </td>
             <td class="px-4 py-3">{{ asset.type }}</td>
@@ -166,12 +199,15 @@
             <td class="px-4 py-3">{{ "%.2f"|format(asset.duration_seconds) if asset.duration_seconds else "-" }}</td>
             <td class="px-4 py-3">{{ asset.preview_status }}</td>
             <td class="px-4 py-3">
-              <div class="text-xs font-medium uppercase text-zinc-600">{{ asset.ai_enrichment_status }}</div>
+              <div>{{ ai_status_badge(asset) }}</div>
               {% if asset.ai_enrichment_confidence is not none %}
-                <div class="mt-1 text-xs text-zinc-500">{{ "%.2f"|format(asset.ai_enrichment_confidence) }}</div>
+                <div class="mt-1 text-xs text-zinc-500">AI {{ "%.2f"|format(asset.ai_enrichment_confidence) }}</div>
               {% endif %}
               {% if asset.needs_human_review %}
-                <div class="mt-1 inline-flex rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800">needs review</div>
+                <div class="mt-1 inline-flex rounded border border-amber-300 bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-900" title="{{ asset.review_reason or 'Requiere revision humana' }}">Revisar</div>
+              {% endif %}
+              {% if asset.ai_enrichment_status == "failed" and asset.ai_error %}
+                <div class="mt-1 max-w-[12rem] truncate text-xs text-red-700" title="{{ asset.ai_error }}">{{ asset.ai_error }}</div>
               {% endif %}
             </td>
             <td class="px-4 py-3">
