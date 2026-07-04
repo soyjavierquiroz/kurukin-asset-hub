@@ -94,15 +94,29 @@
     </div>
   </form>
 
-  <div class="overflow-hidden rounded border border-zinc-200 bg-white">
+  <form class="overflow-hidden rounded border border-zinc-200 bg-white" method="post" action="/assets/generate-previews-bulk">
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-4 py-3">
+      <div class="text-sm text-zinc-600">Preview enrichment</div>
+      <div class="flex flex-wrap items-center gap-3">
+        <label class="flex items-center gap-2 text-sm text-zinc-700">
+          <input class="h-4 w-4 rounded border-zinc-300" type="checkbox" name="force">
+          Regenerate existing
+        </label>
+        <button class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" type="submit">Generate previews for selected</button>
+      </div>
+    </div>
     <table class="w-full min-w-[960px] text-left text-sm">
       <thead class="bg-zinc-100 text-xs uppercase tracking-normal text-zinc-500">
         <tr>
+          <th class="px-4 py-3">Select</th>
+          <th class="px-4 py-3">Preview</th>
           <th class="px-4 py-3">Asset</th>
           <th class="px-4 py-3">Type</th>
           <th class="px-4 py-3">Brand</th>
           <th class="px-4 py-3">Product</th>
           <th class="px-4 py-3">Orientation</th>
+          <th class="px-4 py-3">Duration</th>
+          <th class="px-4 py-3">Preview status</th>
           <th class="px-4 py-3">Policy</th>
           <th class="px-4 py-3">Keywords</th>
           <th class="px-4 py-3">Status</th>
@@ -113,6 +127,16 @@
         {% for asset in assets %}
           <tr class="hover:bg-zinc-50">
             <td class="px-4 py-3">
+              <input class="h-4 w-4 rounded border-zinc-300" type="checkbox" name="asset_ids" value="{{ asset.id }}">
+            </td>
+            <td class="px-4 py-3">
+              {% if asset.thumbnail_path %}
+                <img class="h-16 w-16 rounded object-cover" src="/media/{{ asset.thumbnail_path }}" alt="">
+              {% else %}
+                <div class="flex h-16 w-16 items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-xs text-zinc-400">No preview</div>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3">
               <a class="font-medium text-zinc-950 underline decoration-zinc-300 underline-offset-2" href="/assets/{{ asset.id }}">{{ asset.filename }}</a>
               <div class="mt-1 max-w-xl truncate text-xs text-zinc-500">{{ asset.remote_path }}</div>
             </td>
@@ -120,6 +144,8 @@
             <td class="px-4 py-3">{{ asset.brand.name if asset.brand else "-" }}</td>
             <td class="px-4 py-3">{{ asset.product.name if asset.product else "-" }}</td>
             <td class="px-4 py-3">{{ asset.orientation }}</td>
+            <td class="px-4 py-3">{{ "%.2f"|format(asset.duration_seconds) if asset.duration_seconds else "-" }}</td>
+            <td class="px-4 py-3">{{ asset.preview_status }}</td>
             <td class="px-4 py-3">
               <div class="text-xs font-medium uppercase text-zinc-600">{{ asset.usage_scope }}</div>
               <div class="mt-1 text-xs {{ 'text-emerald-700' if asset.auto_select_enabled else 'text-red-700' }}">
@@ -140,12 +166,12 @@
           </tr>
         {% else %}
           <tr>
-            <td class="px-4 py-8 text-center text-zinc-500" colspan="9">No assets found.</td>
+            <td class="px-4 py-8 text-center text-zinc-500" colspan="13">No assets found.</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
-  </div>
+  </form>
 
   <div class="mt-4 flex items-center justify-between text-sm text-zinc-600">
     <span>Page {{ page }} of {{ pages }}</span>

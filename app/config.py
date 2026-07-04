@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     admin_username: str = Field(default="admin", alias="ADMIN_USERNAME")
     admin_password: str = Field(default="change-me", alias="ADMIN_PASSWORD")
     asset_hub_api_key: str = Field(default="change-me", alias="ASSET_HUB_API_KEY")
+    preview_storage_dir: str = Field(default="/data/previews", alias="PREVIEW_STORAGE_DIR")
     app_env: str = Field(default="production", alias="APP_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

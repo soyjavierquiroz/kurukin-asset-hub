@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 ASSET_TYPE_VALUES = ("video", "image", "audio", "unknown")
 ASSET_STATUS_VALUES = ("active", "inactive", "missing", "archived")
+PREVIEW_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
+TECHNICAL_METADATA_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
 ORIENTATION_VALUES = ("9:16", "16:9", "square", "unknown")
 OVERLAY_SAFE_AREA_VALUES = ("top", "center", "bottom", "left", "right", "full", "unknown")
 SHOT_TYPE_VALUES = ("closeup", "medium", "wide", "detail", "establishing", "unknown")
@@ -70,6 +72,14 @@ class Asset(TimestampMixin, Base):
         CheckConstraint(f"provider in {PROVIDER_VALUES}", name="ck_assets_provider"),
         CheckConstraint(f"type in {ASSET_TYPE_VALUES}", name="ck_assets_type"),
         CheckConstraint(f"status in {ASSET_STATUS_VALUES}", name="ck_assets_status"),
+        CheckConstraint(
+            f"preview_status in {PREVIEW_STATUS_VALUES}",
+            name="ck_assets_preview_status",
+        ),
+        CheckConstraint(
+            f"technical_metadata_status in {TECHNICAL_METADATA_STATUS_VALUES}",
+            name="ck_assets_technical_metadata_status",
+        ),
         CheckConstraint(f"orientation in {ORIENTATION_VALUES}", name="ck_assets_orientation"),
         CheckConstraint(
             f"overlay_safe_area in {OVERLAY_SAFE_AREA_VALUES}",
@@ -159,6 +169,26 @@ class Asset(TimestampMixin, Base):
         server_default=text("'active'"),
     )
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    preview_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    preview_path: Mapped[str | None] = mapped_column(String(1200))
+    thumbnail_path: Mapped[str | None] = mapped_column(String(1200))
+    preview_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    preview_error: Mapped[str | None] = mapped_column(Text)
+    technical_metadata_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    probe_error: Mapped[str | None] = mapped_column(Text)
+    fps: Mapped[float | None] = mapped_column(Float)
+    codec: Mapped[str | None] = mapped_column(String(120))
+    has_audio: Mapped[bool | None] = mapped_column(Boolean)
     search_text: Mapped[str | None] = mapped_column(Text)
     embedding_text: Mapped[str | None] = mapped_column(Text)
     negative_keywords: Mapped[str | None] = mapped_column(Text)

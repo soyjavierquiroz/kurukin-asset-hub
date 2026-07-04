@@ -1,6 +1,6 @@
 services:
   web:
-    image: ${WEB_IMAGE:-kurukin-asset-hub-web:admin-ui}
+    image: ${WEB_IMAGE:-kurukin-asset-hub-web:asset-preview-enrichment}
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,8 +14,11 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       ASSET_HUB_API_KEY: ${ASSET_HUB_API_KEY:-change-me}
+      PREVIEW_STORAGE_DIR: ${PREVIEW_STORAGE_DIR:-/data/previews}
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - previews:/data/previews
     networks:
       - asset_hub_internal
       - traefik_public
@@ -69,3 +72,4 @@ networks:
 
 volumes:
   asset_hub_postgres_data:
+  previews:

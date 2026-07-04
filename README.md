@@ -45,13 +45,19 @@ make deploy
 Cuando el stack esté levantado, ejecutar Alembic dentro de la red interna del stack:
 
 ```bash
-docker run --rm --env-file .env --network kurukin-asset-hub_asset_hub_internal kurukin-asset-hub-web:admin-ui alembic upgrade head
+docker run --rm --env-file .env --network kurukin-asset-hub_asset_hub_internal kurukin-asset-hub-web:asset-preview-enrichment alembic upgrade head
 ```
 
 O usar:
 
 ```bash
 make migrate
+```
+
+Para esta rama, la imagen esperada es:
+
+```bash
+docker build -t kurukin-asset-hub-web:asset-preview-enrichment .
 ```
 
 ## Health checks
@@ -163,7 +169,7 @@ docker run --rm \
   --network kurukin-asset-hub_asset_hub_internal \
   -v /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro \
   -e RCLONE_CONFIG=/config/rclone/rclone.conf \
-  kurukin-asset-hub-web:rclone-indexer \
+  kurukin-asset-hub-web:asset-preview-enrichment \
   python scripts/index_rclone_source.py \
     --source-id drive_mujer_no_escribas \
     --remote gdrive_mne \
@@ -174,6 +180,56 @@ docker run --rm \
 ```
 
 Los assets se deduplican por `source + remote_path`; si un archivo ya existe para esa fuente, el indexador actualiza metadata como filename, extensión, tamaño, remote y fecha de indexado. El servicio web no monta `rclone.conf` por defecto y no falla si ese archivo no existe.
+
+## Previews and technical enrichment
+
+Los archivos maestros no se guardan en el servidor. Para enriquecer un asset, el servicio descarga una copia temporal desde el remote rclone configurado en el asset, ejecuta `ffprobe`/`ffmpeg`, borra el temporal al terminar y conserva sólo previews livianos en un volumen Docker persistente.
+
+El volumen de previews se monta en:
+
+```env
+PREVIEW_STORAGE_DIR=/data/previews
+```
+
+En Swarm, el volumen usado por el servicio web es `kurukin-asset-hub_previews` y se monta en `/data/previews`. Los paths guardados en DB son relativos, por ejemplo `previews/<asset_uid>/thumbnail.jpg` o `previews/<asset_uid>/preview.mp4`.
+
+`rclone.conf` no se commitea y no se monta en el servicio web por defecto. Sólo debe montarse en scripts o acciones que necesitan descargar temporalmente desde el remote.
+
+Generar o regenerar un asset desde la UI:
+
+- Entrar a `/assets/{id}` con Basic Auth.
+- Usar `Generate Preview`.
+- Si ya existe preview, el botón muestra `Regenerate Preview`.
+
+También se puede seleccionar assets en `/assets` y ejecutar `Generate previews for selected`.
+
+Ejemplo CLI por asset ID:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network kurukin-asset-hub_asset_hub_internal \
+  -v /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro \
+  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
+  -v kurukin-asset-hub_previews:/data/previews \
+  kurukin-asset-hub-web:asset-preview-enrichment \
+  python scripts/enrich_asset_previews.py --asset-id 1
+```
+
+Ejemplo CLI para pendientes:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network kurukin-asset-hub_asset_hub_internal \
+  -v /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro \
+  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
+  -v kurukin-asset-hub_previews:/data/previews \
+  kurukin-asset-hub-web:asset-preview-enrichment \
+  python scripts/enrich_asset_previews.py --pending --limit 10
+```
+
+Agregar `--force` para regenerar previews existentes.
 
 ## Revisión de Traefik y servicios
 

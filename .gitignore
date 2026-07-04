@@ -11,3 +11,7 @@ venv/
 .DS_Store
 dist/
 build/
+data/
+previews/
+*.preview.jpg
+*.thumbnail.jpg

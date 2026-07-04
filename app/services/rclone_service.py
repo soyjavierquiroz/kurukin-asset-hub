@@ -12,6 +12,16 @@ class RcloneService:
     def __init__(self, binary: str = "rclone") -> None:
         self.binary = binary
 
+    def copyto(self, remote: str, remote_path: str, local_path: str) -> None:
+        source = self._target(remote, remote_path)
+        command = [
+            self.binary,
+            "copyto",
+            source,
+            local_path,
+        ]
+        self._run(command, operation="copyto", timeout=900)
+
     def list_json(self, remote: str, root: str) -> list[dict[str, Any]]:
         target = self._target(remote, root)
         command = [
@@ -21,7 +31,7 @@ class RcloneService:
             "--recursive",
             "--files-only",
         ]
-        result = self._run(command)
+        result = self._run(command, operation="lsjson", timeout=300)
 
         try:
             payload = json.loads(result.stdout)
@@ -38,23 +48,29 @@ class RcloneService:
             entries.append(item)
         return entries
 
-    def _run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        command: list[str],
+        *,
+        operation: str,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
         try:
             return subprocess.run(
                 command,
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
             )
         except FileNotFoundError as exc:
             raise RcloneError("rclone binary was not found in PATH") from exc
         except subprocess.TimeoutExpired as exc:
-            raise RcloneError("rclone lsjson timed out") from exc
+            raise RcloneError(f"rclone {operation} timed out") from exc
         except subprocess.CalledProcessError as exc:
             message = sanitize_rclone_message((exc.stderr or exc.stdout or "").strip())
             detail = f": {message}" if message else ""
-            raise RcloneError(f"rclone lsjson failed{detail}") from exc
+            raise RcloneError(f"rclone {operation} failed{detail}") from exc
 
     @staticmethod
     def _target(remote: str, root: str) -> str:

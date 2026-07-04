@@ -1,10 +1,11 @@
 import math
 import secrets
 from typing import Annotated
+from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Select, and_, func, or_, select
@@ -20,6 +21,12 @@ from app.models.asset import (
     USAGE_SCOPE_VALUES,
 )
 from app.models.common import PROVIDER_VALUES
+from app.services.asset_preview import (
+    PREVIEW_FILENAMES,
+    generate_asset_preview,
+    preview_output_dir,
+    safe_asset_uid,
+)
 
 router = APIRouter(tags=["admin"])
 templates = Jinja2Templates(directory="app/templates")
@@ -242,6 +249,57 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
         "assets/detail.html",
         {"page_title": asset.filename, "asset": asset},
     )
+
+
+@router.post("/assets/{asset_id}/generate-preview")
+def assets_generate_preview(asset_id: int, _: AdminUser, session: DbSession):
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    force = asset.preview_status == "ready"
+    generate_asset_preview(session, asset_id, force=force)
+    return redirect_to(f"/assets/{asset_id}")
+
+
+@router.post("/assets/generate-previews-bulk")
+async def assets_generate_previews_bulk(request: Request, _: AdminUser, session: DbSession):
+    form = await request.form()
+    raw_ids = form.getlist("asset_ids")
+    force = form.get("force") == "on"
+    for raw_id in raw_ids:
+        try:
+            generate_asset_preview(session, int(raw_id), force=force)
+        except (TypeError, ValueError):
+            continue
+    return redirect_to("/assets")
+
+
+def serve_preview_file(asset_uid: str, filename: str) -> FileResponse:
+    if filename not in PREVIEW_FILENAMES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
+    try:
+        safe_uid = safe_asset_uid(asset_uid)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found") from exc
+    path = preview_output_dir(safe_uid) / filename
+    if not path.is_file() or Path(path).parent != preview_output_dir(safe_uid):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
+    return FileResponse(path)
+
+
+@router.get("/media/previews/{asset_uid}/thumbnail.jpg")
+def media_preview_thumbnail(asset_uid: str, _: AdminUser):
+    return serve_preview_file(asset_uid, "thumbnail.jpg")
+
+
+@router.get("/media/previews/{asset_uid}/preview.mp4")
+def media_preview_video(asset_uid: str, _: AdminUser):
+    return serve_preview_file(asset_uid, "preview.mp4")
+
+
+@router.get("/media/previews/{asset_uid}/preview.jpg")
+def media_preview_image(asset_uid: str, _: AdminUser):
+    return serve_preview_file(asset_uid, "preview.jpg")
 
 
 @router.get("/sources")
