@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from app.models.asset import Asset
     from app.models.brand import Brand
     from app.models.collection import Collection
+    from app.models.product_asset_policy import ProductAssetPolicy
 
 
 class Product(TimestampMixin, Base):
@@ -30,4 +31,8 @@ class Product(TimestampMixin, Base):
     brand: Mapped["Brand"] = relationship(back_populates="products")
     collections: Mapped[list["Collection"]] = relationship(back_populates="product")
     assets: Mapped[list["Asset"]] = relationship(back_populates="product")
-
+    asset_policy: Mapped["ProductAssetPolicy | None"] = relationship(
+        back_populates="product",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )

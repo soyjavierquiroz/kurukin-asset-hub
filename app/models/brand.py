@@ -8,6 +8,8 @@ from app.models.common import TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.asset import Asset
+    from app.models.asset_allowed_brand import AssetAllowedBrand
+    from app.models.brand_asset_policy import BrandAssetPolicy
     from app.models.collection import Collection
     from app.models.product import Product
 
@@ -28,4 +30,12 @@ class Brand(TimestampMixin, Base):
     products: Mapped[list["Product"]] = relationship(back_populates="brand")
     collections: Mapped[list["Collection"]] = relationship(back_populates="brand")
     assets: Mapped[list["Asset"]] = relationship(back_populates="brand")
-
+    allowed_assets: Mapped[list["AssetAllowedBrand"]] = relationship(
+        back_populates="brand",
+        cascade="all, delete-orphan",
+    )
+    asset_policy: Mapped["BrandAssetPolicy | None"] = relationship(
+        back_populates="brand",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )

@@ -1,6 +1,7 @@
 import math
 import secrets
 from typing import Annotated
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
@@ -11,8 +12,13 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.db import get_db_session
-from app.models import Asset, Brand, Niche, Product, Source
-from app.models.asset import ASSET_STATUS_VALUES, ASSET_TYPE_VALUES, ORIENTATION_VALUES
+from app.models import Asset, AssetAllowedBrand, AssetKeyword, Brand, Niche, Product, Source
+from app.models.asset import (
+    ASSET_STATUS_VALUES,
+    ASSET_TYPE_VALUES,
+    ORIENTATION_VALUES,
+    USAGE_SCOPE_VALUES,
+)
 from app.models.common import PROVIDER_VALUES
 
 router = APIRouter(tags=["admin"])
@@ -58,6 +64,15 @@ def redirect_to(path: str) -> RedirectResponse:
     return RedirectResponse(path, status_code=status.HTTP_303_SEE_OTHER)
 
 
+def build_query_string(params: dict[str, object]) -> str:
+    clean_params = {
+        key: str(value).lower() if isinstance(value, bool) else value
+        for key, value in params.items()
+        if value not in (None, "")
+    }
+    return urlencode(clean_params)
+
+
 def get_or_404(session: Session, model: type[Brand] | type[Product] | type[Niche] | type[Source], item_id: int):
     item = session.get(model, item_id)
     if item is None:
@@ -93,6 +108,9 @@ def assets_index(
     type: str | None = None,
     orientation: str | None = None,
     status: str | None = None,
+    keyword: str | None = None,
+    usage_scope: str | None = None,
+    auto_select_enabled: bool | None = None,
     page: int = 1,
 ):
     page = max(page, 1)
@@ -120,12 +138,20 @@ def assets_index(
         filters.append(Asset.orientation == orientation)
     if status:
         filters.append(Asset.status == status)
+    if clean_text(keyword):
+        like = f"%{keyword.strip()}%"
+        filters.append(Asset.keywords.any(AssetKeyword.keyword.ilike(like)))
+    if usage_scope:
+        filters.append(Asset.usage_scope == usage_scope)
+    if auto_select_enabled is not None:
+        filters.append(Asset.auto_select_enabled.is_(auto_select_enabled))
 
     query: Select[tuple[Asset]] = select(Asset).options(
         selectinload(Asset.source),
         selectinload(Asset.brand),
         selectinload(Asset.product),
         selectinload(Asset.niches),
+        selectinload(Asset.keywords),
     )
     count_query = select(func.count(func.distinct(Asset.id))).select_from(Asset)
 
@@ -161,10 +187,28 @@ def assets_index(
                 "type": type or "",
                 "orientation": orientation or "",
                 "status": status or "",
+                "keyword": keyword or "",
+                "usage_scope": usage_scope or "",
+                "auto_select_enabled": auto_select_enabled,
             },
             "type_values": ASSET_TYPE_VALUES,
             "orientation_values": ORIENTATION_VALUES,
             "status_values": ASSET_STATUS_VALUES,
+            "usage_scope_values": USAGE_SCOPE_VALUES,
+            "pagination_query": build_query_string(
+                {
+                    "q": q,
+                    "brand_id": brand_id,
+                    "product_id": product_id,
+                    "niche_id": niche_id,
+                    "type": type,
+                    "orientation": orientation,
+                    "status": status,
+                    "keyword": keyword,
+                    "usage_scope": usage_scope,
+                    "auto_select_enabled": auto_select_enabled,
+                }
+            ),
             "page": page,
             "pages": pages,
             "total": total,
@@ -183,6 +227,10 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
             selectinload(Asset.product),
             selectinload(Asset.niches),
             selectinload(Asset.tags),
+            selectinload(Asset.keywords),
+            selectinload(Asset.allowed_brands).selectinload(
+                AssetAllowedBrand.brand,
+            ),
             selectinload(Asset.usages),
             selectinload(Asset.collections),
         )

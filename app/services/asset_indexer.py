@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Asset, AssetTag, Brand, Niche, Product, Source
+from app.models import Asset, AssetKeyword, AssetTag, Brand, Niche, Product, Source
 
 VIDEO_EXTENSIONS = frozenset({"mp4", "mov", "avi", "mkv"})
 IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png"})
@@ -22,6 +22,7 @@ LOGO_TOKENS = frozenset({"logo", "marca"})
 WATERMARK_TOKENS = frozenset({"watermark"})
 TEXT_LOGO_WATERMARK_TOKENS = VISIBLE_TEXT_TOKENS | LOGO_TOKENS | WATERMARK_TOKENS
 TOKEN_SPLIT_RE = re.compile(r"[\s_-]+")
+KEYWORD_SPLIT_RE = re.compile(r"[\W_]+", re.UNICODE)
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,16 @@ class TextLogoWatermarkInference:
     has_logo: bool
     has_watermark: bool
     flip_horizontal_allowed: bool
+
+
+@dataclass(frozen=True)
+class InferredKeyword:
+    keyword: str
+    category: str
+    weight: float
+    confidence: float
+    source: str = "indexer"
+    language: str = "und"
 
 
 class AssetIndexer:
@@ -167,6 +178,8 @@ class AssetIndexer:
         asset_type = infer_asset_type(file_ext)
         tags = infer_tags(filename)
         text_inference = infer_text_logo_watermark(tags)
+        generated_at = datetime.now(UTC)
+        usage_scope = infer_default_usage_scope(brand=brand, asset_type=asset_type)
 
         if asset is None:
             asset = Asset(
@@ -177,6 +190,8 @@ class AssetIndexer:
                 provider=context.provider,
                 status="active",
                 orientation="unknown",
+                usage_scope=usage_scope,
+                auto_select_enabled=usage_scope != "restricted",
             )
             self.session.add(asset)
 
@@ -191,7 +206,26 @@ class AssetIndexer:
         asset.brand = brand
         asset.product = product
         asset.status = "active"
-        asset.last_indexed_at = datetime.now(UTC)
+        asset.last_indexed_at = generated_at
+        if asset.usage_scope in {"global", "brand_exclusive"}:
+            asset.usage_scope = usage_scope
+        if asset.usage_scope == "restricted":
+            asset.auto_select_enabled = False
+        asset.search_text = build_search_text(
+            asset,
+            source=source,
+            brand=brand,
+            product=product,
+            niche=niche,
+        )
+        asset.embedding_text = build_embedding_text(
+            asset,
+            source=source,
+            brand=brand,
+            product=product,
+            niche=niche,
+        )
+        asset.auto_keywords_generated_at = generated_at
 
         if text_inference.has_visible_text:
             asset.has_visible_text = True
@@ -208,6 +242,17 @@ class AssetIndexer:
         existing_tags = {asset_tag.tag for asset_tag in asset.tags}
         for tag in tags - existing_tags:
             asset.tags.append(AssetTag(tag=tag))
+
+        refresh_indexer_keywords(
+            asset,
+            infer_keywords(
+                filename=filename,
+                source=source,
+                brand=brand,
+                product=product,
+                niche=niche,
+            ),
+        )
 
         return created
 
@@ -243,6 +288,167 @@ def infer_tags(filename: str) -> set[str]:
     stem = PurePosixPath(filename).stem.lower()
     raw_tokens = TOKEN_SPLIT_RE.split(stem)
     return {token for token in raw_tokens if len(token) > 2}
+
+
+def infer_default_usage_scope(brand: Brand | None, asset_type: str) -> str:
+    if asset_type == "audio":
+        return "global"
+    if brand is not None and asset_type in {"video", "image"}:
+        return "brand_exclusive"
+    return "global"
+
+
+def infer_keywords(
+    filename: str,
+    source: Source,
+    brand: Brand | None,
+    product: Product | None,
+    niche: Niche | None,
+) -> list[InferredKeyword]:
+    candidates: list[InferredKeyword] = []
+    candidates.extend(
+        InferredKeyword(token, "filename", 1.0, 0.95)
+        for token in tokenize_keyword_text(PurePosixPath(filename).stem)
+    )
+    candidates.extend(
+        InferredKeyword(token, "source", 0.65, 0.85)
+        for token in tokenize_keyword_values(
+            source.source_id,
+            source.label,
+            source.rclone_remote,
+            source.root_path,
+        )
+    )
+    if brand is not None:
+        candidates.extend(
+            InferredKeyword(token, "brand", 1.25, 0.95)
+            for token in tokenize_keyword_values(brand.slug, brand.name)
+        )
+    if product is not None:
+        candidates.extend(
+            InferredKeyword(token, "product", 1.1, 0.9)
+            for token in tokenize_keyword_values(product.slug, product.name)
+        )
+    if niche is not None:
+        candidates.extend(
+            InferredKeyword(token, "niche", 1.0, 0.9)
+            for token in tokenize_keyword_values(niche.slug, niche.name)
+        )
+
+    deduped: dict[tuple[str, str, str], InferredKeyword] = {}
+    for candidate in candidates:
+        key = (candidate.keyword, candidate.category, candidate.language)
+        previous = deduped.get(key)
+        if previous is None or candidate.weight > previous.weight:
+            deduped[key] = candidate
+    return sorted(deduped.values(), key=lambda item: (item.category, item.keyword))
+
+
+def tokenize_keyword_text(value: str | None, keep_compound: bool = False) -> set[str]:
+    if not value:
+        return set()
+    normalized = value.lower().strip()
+    raw_tokens = KEYWORD_SPLIT_RE.split(normalized)
+    tokens = {token for token in raw_tokens if len(token) > 2}
+    if keep_compound:
+        compound = re.sub(r"[\W]+", "_", normalized).strip("_")
+        if len(compound) > 2:
+            tokens.add(compound)
+    return tokens
+
+
+def tokenize_keyword_values(*values: str | None) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        tokens.update(tokenize_keyword_text(value, keep_compound=True))
+    return tokens
+
+
+def refresh_indexer_keywords(asset: Asset, keywords: list[InferredKeyword]) -> None:
+    expected_keys = {
+        (keyword.keyword, keyword.category, keyword.language)
+        for keyword in keywords
+    }
+    existing_by_key = {
+        (keyword.keyword, keyword.category, keyword.language): keyword
+        for keyword in asset.keywords
+        if keyword.source == "indexer"
+    }
+
+    for existing in list(asset.keywords):
+        key = (existing.keyword, existing.category, existing.language)
+        if existing.source == "indexer" and key not in expected_keys:
+            asset.keywords.remove(existing)
+
+    for keyword in keywords:
+        key = (keyword.keyword, keyword.category, keyword.language)
+        existing = existing_by_key.get(key)
+        if existing is None:
+            asset.keywords.append(
+                AssetKeyword(
+                    keyword=keyword.keyword,
+                    category=keyword.category,
+                    weight=keyword.weight,
+                    confidence=keyword.confidence,
+                    source=keyword.source,
+                    language=keyword.language,
+                )
+            )
+            continue
+        existing.weight = keyword.weight
+        existing.confidence = keyword.confidence
+        existing.source = keyword.source
+
+
+def build_search_text(
+    asset: Asset,
+    source: Source,
+    brand: Brand | None,
+    product: Product | None,
+    niche: Niche | None,
+) -> str:
+    parts = [
+        asset.asset_uid,
+        asset.filename,
+        asset.remote_path,
+        asset.title,
+        asset.description,
+        source.source_id,
+        source.label,
+        brand.slug if brand else None,
+        brand.name if brand else None,
+        product.slug if product else None,
+        product.name if product else None,
+        niche.slug if niche else None,
+        niche.name if niche else None,
+    ]
+    return compact_text(parts)
+
+
+def build_embedding_text(
+    asset: Asset,
+    source: Source,
+    brand: Brand | None,
+    product: Product | None,
+    niche: Niche | None,
+) -> str:
+    parts = [
+        asset.filename,
+        asset.title,
+        asset.description,
+        asset.visual_description,
+        asset.action_description,
+        asset.best_for,
+        brand.name if brand else None,
+        product.name if product else None,
+        niche.name if niche else None,
+        source.label,
+    ]
+    return compact_text(parts)
+
+
+def compact_text(parts: list[str | None]) -> str:
+    return " ".join(part.strip() for part in parts if isinstance(part, str) and part.strip())
 
 
 def infer_text_logo_watermark(tags: set[str]) -> TextLogoWatermarkInference:

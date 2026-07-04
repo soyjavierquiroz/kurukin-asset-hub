@@ -67,6 +67,27 @@
         {% endfor %}
       </select>
     </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Keyword
+      <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" type="search" name="keyword" value="{{ filters.keyword }}">
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Usage scope
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="usage_scope">
+        <option value="">All</option>
+        {% for value in usage_scope_values %}
+          <option value="{{ value }}" {% if filters.usage_scope == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Auto-select
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="auto_select_enabled">
+        <option value="" {% if filters.auto_select_enabled is none %}selected{% endif %}>All</option>
+        <option value="true" {% if filters.auto_select_enabled is sameas true %}selected{% endif %}>Enabled</option>
+        <option value="false" {% if filters.auto_select_enabled is sameas false %}selected{% endif %}>Disabled</option>
+      </select>
+    </label>
     <div class="flex items-end gap-2">
       <button class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" type="submit">Filter</button>
       <a class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" href="/assets">Reset</a>
@@ -82,6 +103,8 @@
           <th class="px-4 py-3">Brand</th>
           <th class="px-4 py-3">Product</th>
           <th class="px-4 py-3">Orientation</th>
+          <th class="px-4 py-3">Policy</th>
+          <th class="px-4 py-3">Keywords</th>
           <th class="px-4 py-3">Status</th>
           <th class="px-4 py-3">Source</th>
         </tr>
@@ -97,12 +120,27 @@
             <td class="px-4 py-3">{{ asset.brand.name if asset.brand else "-" }}</td>
             <td class="px-4 py-3">{{ asset.product.name if asset.product else "-" }}</td>
             <td class="px-4 py-3">{{ asset.orientation }}</td>
+            <td class="px-4 py-3">
+              <div class="text-xs font-medium uppercase text-zinc-600">{{ asset.usage_scope }}</div>
+              <div class="mt-1 text-xs {{ 'text-emerald-700' if asset.auto_select_enabled else 'text-red-700' }}">
+                {{ "auto-select on" if asset.auto_select_enabled else "auto-select off" }}
+              </div>
+            </td>
+            <td class="px-4 py-3">
+              <div class="flex max-w-xs flex-wrap gap-1">
+                {% for keyword in asset.keywords[:6] %}
+                  <span class="rounded border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700">{{ keyword.keyword }}</span>
+                {% else %}
+                  <span class="text-xs text-zinc-400">-</span>
+                {% endfor %}
+              </div>
+            </td>
             <td class="px-4 py-3">{{ asset.status }}</td>
             <td class="px-4 py-3">{{ asset.source.label if asset.source else "-" }}</td>
           </tr>
         {% else %}
           <tr>
-            <td class="px-4 py-8 text-center text-zinc-500" colspan="7">No assets found.</td>
+            <td class="px-4 py-8 text-center text-zinc-500" colspan="9">No assets found.</td>
           </tr>
         {% endfor %}
       </tbody>
@@ -113,10 +151,10 @@
     <span>Page {{ page }} of {{ pages }}</span>
     <div class="flex gap-2">
       {% if page > 1 %}
-        <a class="rounded border border-zinc-300 px-3 py-2 hover:bg-zinc-100" href="?q={{ filters.q }}&brand_id={{ filters.brand_id or '' }}&product_id={{ filters.product_id or '' }}&niche_id={{ filters.niche_id or '' }}&type={{ filters.type }}&orientation={{ filters.orientation }}&status={{ filters.status }}&page={{ page - 1 }}">Previous</a>
+        <a class="rounded border border-zinc-300 px-3 py-2 hover:bg-zinc-100" href="?{{ pagination_query }}{% if pagination_query %}&{% endif %}page={{ page - 1 }}">Previous</a>
       {% endif %}
       {% if page < pages %}
-        <a class="rounded border border-zinc-300 px-3 py-2 hover:bg-zinc-100" href="?q={{ filters.q }}&brand_id={{ filters.brand_id or '' }}&product_id={{ filters.product_id or '' }}&niche_id={{ filters.niche_id or '' }}&type={{ filters.type }}&orientation={{ filters.orientation }}&status={{ filters.status }}&page={{ page + 1 }}">Next</a>
+        <a class="rounded border border-zinc-300 px-3 py-2 hover:bg-zinc-100" href="?{{ pagination_query }}{% if pagination_query %}&{% endif %}page={{ page + 1 }}">Next</a>
       {% endif %}
     </div>
   </div>

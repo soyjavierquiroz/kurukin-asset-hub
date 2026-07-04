@@ -5,12 +5,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import Base
-from app.models import Asset, Brand, Niche, Product
+from app.models import Asset, Brand, Niche, Product, Source
 from app.services.asset_indexer import (
     ALLOWED_EXTENSIONS,
     AssetIndexContext,
     AssetIndexer,
     infer_asset_type,
+    infer_default_usage_scope,
+    infer_keywords,
     infer_tags,
     infer_text_logo_watermark,
 )
@@ -77,6 +79,16 @@ def test_text_logo_watermark_inference_affects_flip_horizontal_allowed() -> None
     assert inference.flip_horizontal_allowed is False
 
 
+def test_default_usage_scope_inference(session: Session, catalog: None) -> None:
+    brand = session.scalar(select(Brand).where(Brand.slug == "mujer_no_escribas"))
+    assert brand is not None
+
+    assert infer_default_usage_scope(brand, "video") == "brand_exclusive"
+    assert infer_default_usage_scope(brand, "image") == "brand_exclusive"
+    assert infer_default_usage_scope(brand, "audio") == "global"
+    assert infer_default_usage_scope(None, "video") == "global"
+
+
 def test_upsert_creates_asset(session: Session, catalog: None) -> None:
     summary = AssetIndexer(session).index_entries(
         [{"Path": "videos/hook_texto.mp4", "Name": "hook_texto.mp4", "Size": 123}],
@@ -101,6 +113,49 @@ def test_upsert_creates_asset(session: Session, catalog: None) -> None:
     assert asset.product is not None
     assert asset.niches[0].slug == "relaciones"
     assert {tag.tag for tag in asset.tags} == {"hook", "texto"}
+    assert asset.usage_scope == "brand_exclusive"
+    assert asset.auto_select_enabled is True
+    assert asset.search_text is not None
+    assert "mujer_no_escribas" in asset.search_text
+    assert asset.embedding_text is not None
+    assert "Mujer No Escribas" in asset.embedding_text
+    assert asset.auto_keywords_generated_at is not None
+    assert {keyword.keyword for keyword in asset.keywords} >= {
+        "hook",
+        "texto",
+        "mujer_no_escribas",
+        "relaciones",
+    }
+
+
+def test_keyword_generation_uses_filename_source_brand_product_and_niche(
+    session: Session,
+    catalog: None,
+) -> None:
+    source = Source(
+        source_id="drive_mujer_no_escribas",
+        provider="google_drive",
+        label="Drive Mujer No Escribas",
+    )
+    brand = session.scalar(select(Brand).where(Brand.slug == "mujer_no_escribas"))
+    product = session.scalar(select(Product).where(Product.slug == "metodo_pausa"))
+    niche = session.scalar(select(Niche).where(Niche.slug == "relaciones"))
+    assert brand is not None
+    assert product is not None
+    assert niche is not None
+
+    keywords = infer_keywords(
+        filename="Hook_relaciones-texto final.MP4",
+        source=source,
+        brand=brand,
+        product=product,
+        niche=niche,
+    )
+    keyword_values = {keyword.keyword for keyword in keywords}
+
+    assert {"hook", "relaciones", "texto", "drive_mujer_no_escribas"} <= keyword_values
+    assert "mujer_no_escribas" in keyword_values
+    assert "metodo_pausa" in keyword_values
 
 
 def test_upsert_updates_existing_asset(session: Session, catalog: None) -> None:

@@ -23,6 +23,8 @@ from app.db import Base
 from app.models.common import PROVIDER_VALUES, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.asset_allowed_brand import AssetAllowedBrand
+    from app.models.asset_keyword import AssetKeyword
     from app.models.asset_tag import AssetTag
     from app.models.asset_usage import AssetUsage
     from app.models.brand import Brand
@@ -51,6 +53,14 @@ BEST_SCENE_ROLE_VALUES = (
     "background",
     "unknown",
 )
+USAGE_SCOPE_VALUES = (
+    "global",
+    "brand_exclusive",
+    "allowed_brands",
+    "collection_only",
+    "restricted",
+)
+RIGHTS_STATUS_VALUES = ("owned", "licensed", "stock", "unknown", "restricted")
 
 
 class Asset(TimestampMixin, Base):
@@ -80,11 +90,21 @@ class Asset(TimestampMixin, Base):
             f"best_scene_role in {BEST_SCENE_ROLE_VALUES}",
             name="ck_assets_best_scene_role",
         ),
+        CheckConstraint(
+            f"usage_scope in {USAGE_SCOPE_VALUES}",
+            name="ck_assets_usage_scope",
+        ),
+        CheckConstraint(
+            f"rights_status in {RIGHTS_STATUS_VALUES}",
+            name="ck_assets_rights_status",
+        ),
         Index("ix_assets_type", "type"),
         Index("ix_assets_status", "status"),
         Index("ix_assets_brand_id", "brand_id"),
         Index("ix_assets_product_id", "product_id"),
         Index("ix_assets_orientation", "orientation"),
+        Index("ix_assets_usage_scope", "usage_scope"),
+        Index("ix_assets_auto_select_enabled", "auto_select_enabled"),
         Index("ix_assets_filename", "filename"),
         Index("ix_assets_last_used_at", "last_used_at"),
         Index("ix_assets_source_id_remote_path", "source_id", "remote_path"),
@@ -139,6 +159,30 @@ class Asset(TimestampMixin, Base):
         server_default=text("'active'"),
     )
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    search_text: Mapped[str | None] = mapped_column(Text)
+    embedding_text: Mapped[str | None] = mapped_column(Text)
+    negative_keywords: Mapped[str | None] = mapped_column(Text)
+    auto_keywords_generated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    usage_scope: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="global",
+        server_default=text("'global'"),
+    )
+    rights_status: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="unknown",
+        server_default=text("'unknown'"),
+    )
+    auto_select_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
 
     flip_horizontal_allowed: Mapped[bool] = mapped_column(
         Boolean,
@@ -264,6 +308,14 @@ class Asset(TimestampMixin, Base):
         back_populates="asset",
         cascade="all, delete-orphan",
     )
+    keywords: Mapped[list["AssetKeyword"]] = relationship(
+        back_populates="asset",
+        cascade="all, delete-orphan",
+    )
+    allowed_brands: Mapped[list["AssetAllowedBrand"]] = relationship(
+        back_populates="asset",
+        cascade="all, delete-orphan",
+    )
     usages: Mapped[list["AssetUsage"]] = relationship(
         back_populates="asset",
         cascade="all, delete-orphan",
@@ -276,4 +328,3 @@ class Asset(TimestampMixin, Base):
         secondary="asset_collections",
         back_populates="assets",
     )
-

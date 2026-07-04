@@ -17,13 +17,14 @@ Copiar el archivo de ejemplo:
 cp .env.example .env
 ```
 
-Editar las variables antes de desplegar. Como mínimo, cambiar `POSTGRES_PASSWORD` y alinear `DATABASE_URL` con ese valor.
+Editar las variables antes de desplegar. Como mínimo, cambiar `POSTGRES_PASSWORD`, `ADMIN_PASSWORD`, `ASSET_HUB_API_KEY` y alinear `DATABASE_URL` con ese valor.
 
 ```env
 POSTGRES_PASSWORD=una-password-fuerte
 DATABASE_URL=postgresql+psycopg://asset_hub:una-password-fuerte@db:5432/kurukin_asset_hub
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=otra-password-fuerte
+ASSET_HUB_API_KEY=otra-api-key-fuerte
 ```
 
 ## Build y deploy
@@ -76,6 +77,48 @@ El catálogo inicial vive en modelos SQLAlchemy 2.x bajo `app/models/` y se publ
 
 `Asset` también conserva campos de transformación como flip, crop, zoom, speed change, reverse y color grade. Esos flags permiten escoger variaciones visuales sin repetir assets de forma innecesaria ni asumir transformaciones inseguras para una pieza.
 
+## Keywords and AI-ready search
+
+El indexador genera `AssetKeyword` desde filename, source, brand, product y niche. También llena `search_text` y `embedding_text` básico para que renderers automáticos puedan encontrar piezas por texto sin depender todavía de IA ni embeddings reales.
+
+Las keywords ayudan a buscar candidatos; las policies deciden si un asset puede usarse. Un asset con keyword perfecta no debe ser seleccionado si su policy lo vuelve inelegible para la marca, producto, tipo o rights status de la búsqueda.
+
+`Asset` expone:
+
+- `usage_scope`: `global`, `brand_exclusive`, `allowed_brands`, `collection_only`, `restricted`.
+- `rights_status`: `owned`, `licensed`, `stock`, `unknown`, `restricted`.
+- `auto_select_enabled`: apaga cualquier selección automática sin borrar el asset.
+- `negative_keywords`: términos a evitar en futuras mejoras de matching.
+
+## Brand/Product inherited asset policies
+
+La elegibilidad se hereda desde marca y producto:
+
+- Si existe `ProductAssetPolicy` con `inherit_brand_policy=false`, sus valores no nulos sobrescriben la policy de marca.
+- Si `inherit_brand_policy=true` o no existe policy de producto, se usa `BrandAssetPolicy`.
+- Si no existe `BrandAssetPolicy`, se usan defaults del sistema.
+
+Las policies controlan si se permiten assets globales o stock por tipo (`video`, `image`, `audio`) y si un producto requiere match estricto para video/image. `AssetAllowedBrand` se mantiene como override excepcional para permitir un asset específico en otra marca; no es el flujo principal de permisos.
+
+## Renderer search API
+
+`GET /api/assets/search` está pensado para renderers y requiere API key en header. `/healthz` y `/readyz` siguen públicos.
+
+```bash
+curl "https://assets.kuruk.in/api/assets/search?brand_slug=brand_a&type=video" \
+  -H "X-Asset-Hub-Api-Key: ${ASSET_HUB_API_KEY}"
+```
+
+Parámetros principales:
+
+- `q`, `brand_slug`, `product_slug`, `niche_slug`
+- `type`, `orientation`, `usage_scope`
+- `include_global_assets=true`
+- `include_stock_assets=true`
+- `limit`
+
+Reglas clave: `restricted` nunca aparece, `auto_select_enabled=false` nunca aparece, `brand_exclusive` de otra marca no aparece, y assets globales sólo aparecen si el request y la policy efectiva lo permiten.
+
 ## Admin UI
 
 La UI interna vive en `/` y está renderizada con FastAPI, Jinja2, HTMX y Tailwind CDN. Permite revisar conteos del catálogo, filtrar assets, ver detalle técnico/editorial/transformación/seguridad y administrar sources, brands, products y niches con formularios server-rendered.
@@ -85,6 +128,7 @@ Las rutas web admin usan Basic Auth simple. Configurar estas variables en `.env`
 ```env
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=otra-password-fuerte
+ASSET_HUB_API_KEY=otra-api-key-fuerte
 ```
 
 `/healthz` y `/readyz` permanecen públicos para health checks y readiness externos.
