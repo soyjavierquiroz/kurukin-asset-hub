@@ -17,6 +17,7 @@ from app.models import (
     ProductAssetPolicy,
     Source,
 )
+from app.services.asset_search import normalize_search_text, score_asset_for_query, tokenize_query
 
 API_HEADERS = {"X-Asset-Hub-Api-Key": "test-api-key"}
 
@@ -140,6 +141,56 @@ def seed_search_assets(session: Session) -> dict[str, Asset | Brand | Product]:
             language="und",
         )
     )
+    mystic = make_asset(
+        source=source,
+        uid="asset-mystic",
+        filename="veyra_mistica_energia.mp4",
+        brand=brand_a,
+        product=product_a,
+        usage_scope="brand_exclusive",
+    )
+    mystic.title = "Ritual mistico de energia"
+    mystic.search_text = "mujer encapuchada mistica energia esoterico misterio"
+    mystic.embedding_text = "Mujer encapuchada en escena de misticismo y energia espiritual."
+    mystic.visual_description = "Una mujer encapuchada sostiene un celular en ambiente misterioso."
+    mystic.best_for = "B-roll para narrativas de energia mistica y transformacion personal."
+    mystic.keywords.extend(
+        [
+            AssetKeyword(
+                keyword="místico",
+                category="mood",
+                weight=1.0,
+                confidence=0.95,
+                source="ai",
+                language="es",
+            ),
+            AssetKeyword(
+                keyword="energía",
+                category="concept",
+                weight=1.0,
+                confidence=0.94,
+                source="ai",
+                language="es",
+            ),
+            AssetKeyword(
+                keyword="celular",
+                category="object",
+                weight=0.8,
+                confidence=0.9,
+                source="ai",
+                language="es",
+            ),
+        ]
+    )
+    inactive = make_asset(
+        source=source,
+        uid="asset-inactive",
+        filename="inactive_mistica.mp4",
+        brand=brand_a,
+        product=product_a,
+        usage_scope="brand_exclusive",
+    )
+    inactive.status = "inactive"
 
     session.add_all(
         [
@@ -152,6 +203,8 @@ def seed_search_assets(session: Session) -> dict[str, Asset | Brand | Product]:
             restricted,
             disabled,
             keyword_asset,
+            mystic,
+            inactive,
         ]
     )
     session.commit()
@@ -167,6 +220,8 @@ def seed_search_assets(session: Session) -> dict[str, Asset | Brand | Product]:
         "restricted": restricted,
         "disabled": disabled,
         "keyword": keyword_asset,
+        "mystic": mystic,
+        "inactive": inactive,
     }
 
 
@@ -209,6 +264,27 @@ def get_asset_uids(
     response = client.get("/api/assets/search", params=params or {}, headers=API_HEADERS)
     assert response.status_code == 200
     return asset_uids(response.json())
+
+
+def test_normalize_search_text_removes_accents() -> None:
+    assert normalize_search_text("mística energía") == "mistica energia"
+
+
+def test_tokenize_query_normalizes_and_drops_tiny_tokens() -> None:
+    assert tokenize_query("La mística energía 8") == ["mistica", "energia", "8"]
+
+
+def test_score_matches_accented_keyword_without_accent_query() -> None:
+    client, session_factory = make_test_client()
+    del client
+    with session_factory() as session:
+        seeded = seed_search_assets(session)
+        asset = seeded["mystic"]
+        assert isinstance(asset, Asset)
+
+        score = score_asset_for_query(asset, tokenize_query("mistico energia"))
+
+    assert score > 0
 
 
 def test_search_requires_api_key() -> None:
@@ -380,3 +456,95 @@ def test_search_by_keyword_works() -> None:
     uids = get_asset_uids(client, {"brand_slug": "brand_a", "q": "retention"})
 
     assert uids == {"asset-keyword"}
+
+
+def test_search_with_brand_product_returns_product_assets_without_query() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_search_assets(session)
+
+    uids = get_asset_uids(
+        client,
+        {"brand_slug": "brand_a", "product_slug": "product_a", "limit": "10"},
+    )
+
+    assert "asset-own" in uids
+    assert "asset-mystic" in uids
+
+
+def test_search_token_query_returns_related_asset() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_search_assets(session)
+
+    response = client.get(
+        "/api/assets/search",
+        params={
+            "brand_slug": "brand_a",
+            "product_slug": "product_a",
+            "q": "mistica energia",
+            "type": "video",
+            "limit": "10",
+        },
+        headers=API_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert "asset-mystic" in asset_uids(response.json())
+    assert response.json()["assets"][0]["score"] > 0
+
+
+def test_search_accented_query_matches_same_assets() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_search_assets(session)
+
+    base_params = {
+        "brand_slug": "brand_a",
+        "product_slug": "product_a",
+        "type": "video",
+        "limit": "10",
+    }
+    plain_uids = get_asset_uids(client, {**base_params, "q": "mistica energia"})
+    accented_uids = get_asset_uids(client, {**base_params, "q": "mística energía"})
+
+    assert accented_uids == plain_uids
+    assert "asset-mystic" in accented_uids
+
+
+def test_search_without_brand_does_not_return_brand_exclusive_assets() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_search_assets(session)
+
+    uids = get_asset_uids(client, {"q": "mistica energia", "type": "video", "limit": "10"})
+
+    assert "asset-mystic" not in uids
+
+
+def test_search_wrong_brand_does_not_return_other_brand_exclusive_assets() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_search_assets(session)
+
+    uids = get_asset_uids(
+        client,
+        {"brand_slug": "brand_b", "q": "veyra", "type": "video", "limit": "10"},
+    )
+
+    assert "asset-mystic" not in uids
+    assert "asset-own" not in uids
+
+
+def test_search_excludes_disabled_and_inactive_assets() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_search_assets(session)
+
+    uids = get_asset_uids(
+        client,
+        {"brand_slug": "brand_a", "product_slug": "product_a", "q": "mistica", "limit": "10"},
+    )
+
+    assert "asset-disabled" not in uids
+    assert "asset-inactive" not in uids

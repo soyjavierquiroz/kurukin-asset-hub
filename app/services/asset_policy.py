@@ -103,7 +103,7 @@ def is_asset_eligible_for_search(
             return False
 
     if brand is None:
-        return True
+        return include_global_assets and asset.usage_scope == "global"
 
     if asset.brand_id == brand.id:
         return asset_matches_requested_product(asset, product, policy)

@@ -2,14 +2,15 @@ import secrets
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import and_, case, exists, func, literal, or_, select
+from sqlalchemy import and_, exists, false, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.db import get_db_session
-from app.models import Asset, AssetAllowedBrand, AssetKeyword, Brand, Niche, Product
+from app.models import Asset, AssetAllowedBrand, Brand, Niche, Product
 from app.models.asset import ORIENTATION_VALUES, USAGE_SCOPE_VALUES
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
+from app.services.asset_search import score_asset_for_query, tokenize_query
 from app.services.asset_policy import is_asset_eligible_for_search, resolve_asset_search_policy
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -97,8 +98,8 @@ def search_assets(
                 detail=f"Product not found: {product_slug}",
             )
 
-    if brand is None and include_global_assets is False:
-        filters.append(Asset.usage_scope != "global")
+    if brand is None:
+        filters.append(Asset.usage_scope == "global" if include_global_assets else false())
 
     if not include_stock_assets:
         filters.append(Asset.rights_status != "stock")
@@ -112,26 +113,8 @@ def search_assets(
     if usage_scope:
         filters.append(Asset.usage_scope == usage_scope)
 
-    q_value = clean_search_query(q)
-    keyword_score = literal(0)
-    text_score = literal(0)
-    if q_value:
-        like = f"%{q_value}%"
-        keyword_match = exists(
-            select(AssetKeyword.asset_id).where(
-                AssetKeyword.asset_id == Asset.id,
-                AssetKeyword.keyword.ilike(like),
-            )
-        )
-        text_match = or_(
-            Asset.search_text.ilike(like),
-            Asset.title.ilike(like),
-            Asset.filename.ilike(like),
-            Asset.remote_path.ilike(like),
-        )
-        filters.append(or_(keyword_match, text_match))
-        keyword_score = case((keyword_match, 2), else_=0)
-        text_score = case((text_match, 1), else_=0)
+    tokens = tokenize_query(q)
+    candidate_limit = max(limit * 20, 200)
 
     query = (
         select(Asset)
@@ -145,34 +128,45 @@ def search_assets(
             selectinload(Asset.allowed_brands).selectinload(AssetAllowedBrand.brand),
         )
         .order_by(
-            keyword_score.desc(),
-            text_score.desc(),
             func.coalesce(Asset.quality_score, 0).desc(),
+            func.coalesce(Asset.ai_enrichment_confidence, 0).desc(),
             Asset.usage_count.asc(),
-            case((Asset.last_used_at.is_(None), 0), else_=1).asc(),
-            Asset.last_used_at.asc(),
-            Asset.id.asc(),
+            Asset.id.desc(),
         )
-        .limit(max(limit * 20, 200))
+        .limit(candidate_limit)
     )
     policy = resolve_asset_search_policy(brand=brand, product=product)
-    assets = [
-        asset
-        for asset in session.scalars(query).all()
-        if is_asset_eligible_for_search(
+    scored_assets: list[tuple[Asset, float]] = []
+    for asset in session.scalars(query).all():
+        if not is_asset_eligible_for_search(
             asset=asset,
             brand=brand,
             product=product,
             include_global_assets=include_global_assets,
             include_stock_assets=include_stock_assets,
             policy=policy,
-        )
-    ][:limit]
+        ):
+            continue
+        score = score_asset_for_query(asset, tokens)
+        if tokens and score <= 0:
+            continue
+        scored_assets.append((asset, score))
+
+    scored_assets.sort(
+        key=lambda item: (
+            item[1],
+            item[0].quality_score or 0,
+            item[0].ai_enrichment_confidence or 0,
+            item[0].id,
+        ),
+        reverse=True,
+    )
+    scored_assets = scored_assets[:limit]
 
     return {
-        "count": len(assets),
+        "count": len(scored_assets),
         "limit": limit,
-        "assets": [serialize_asset(asset) for asset in assets],
+        "assets": [serialize_asset(asset, score=score) for asset, score in scored_assets],
     }
 
 
@@ -213,16 +207,10 @@ def allowed_brand_exists(brand: Brand):
     )
 
 
-def clean_search_query(value: str | None) -> str | None:
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
-
-
-def serialize_asset(asset: Asset) -> dict[str, Any]:
+def serialize_asset(asset: Asset, score: float | None = None) -> dict[str, Any]:
     return {
         "id": asset.id,
+        "score": round(score, 4) if score is not None else None,
         "asset_uid": asset.asset_uid,
         "filename": asset.filename,
         "remote_path": asset.remote_path,
