@@ -57,7 +57,7 @@ make migrate
 Para esta rama, la imagen esperada es:
 
 ```bash
-docker build -t kurukin-asset-hub-web:asset-preview-enrichment .
+docker build -t kurukin-asset-hub-web:ai-asset-enrichment .
 ```
 
 ## Health checks
@@ -230,6 +230,64 @@ docker run --rm \
 ```
 
 Agregar `--force` para regenerar previews existentes.
+
+## AI asset enrichment
+
+El enriquecimiento visual con IA usa thumbnails, previews de imagen y frames sampleados desde `preview.mp4`. No guarda masters, no guarda frames temporales y no decide permisos de marca/producto: las keywords y descripciones ayudan a buscar, pero `usage_scope`, rights status y las policies de marca/producto siguen mandando sobre elegibilidad.
+
+Configurar:
+
+```env
+OPENAI_API_KEY=
+AI_ENRICHMENT_ENABLED=false
+AI_PROVIDER=openai
+AI_MODEL=
+AI_FRAME_SAMPLE_COUNT=8
+AI_REVIEW_THRESHOLD=0.72
+AI_MAX_ASSETS_PER_BATCH=20
+```
+
+`OPENAI_API_KEY` es opcional para levantar la app web. Para llamadas reales, definir `OPENAI_API_KEY`, poner `AI_ENRICHMENT_ENABLED=true` y, opcionalmente, fijar `AI_MODEL`. Con `AI_ENRICHMENT_ENABLED=false`, los assets se marcan como `skipped` con razón clara, salvo `--dry-run`, que no llama al proveedor ni muta el asset.
+
+El resultado completo validado se guarda en `AssetAIAnalysis`. El servicio actualiza metadata creativa, flags de seguridad/transformación, `search_text`, `embedding_text`, `best_for`, `avoid_for` y keywords `source=ai`. No borra ni sobrescribe keywords manuales; con `--force` reemplaza sólo keywords previas `source=ai`.
+
+Ejemplo por asset:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network kurukin-asset-hub_asset_hub_internal \
+  -v kurukin-asset-hub_previews:/data/previews \
+  kurukin-asset-hub-web:ai-asset-enrichment \
+  python scripts/enrich_assets_ai.py --asset-id 1
+```
+
+Ejemplo batch pending:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network kurukin-asset-hub_asset_hub_internal \
+  -v kurukin-asset-hub_previews:/data/previews \
+  kurukin-asset-hub-web:ai-asset-enrichment \
+  python scripts/enrich_assets_ai.py --pending --limit 10
+```
+
+Dry-run:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network kurukin-asset-hub_asset_hub_internal \
+  -v kurukin-asset-hub_previews:/data/previews \
+  kurukin-asset-hub-web:ai-asset-enrichment \
+  python scripts/enrich_assets_ai.py --pending --limit 10 --dry-run
+```
+
+Revisar assets que requieren atención:
+
+- En la UI, filtrar `/assets` por `AI status=needs_review` o `Needs review=Yes`.
+- En detalle de asset, la sección `AI Enrichment` muestra status, confidence, modelo, razón de revisión y errores sanitizados.
 
 ## Revisión de Traefik y servicios
 

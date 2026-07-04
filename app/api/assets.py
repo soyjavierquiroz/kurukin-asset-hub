@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.db import get_db_session
 from app.models import Asset, AssetAllowedBrand, AssetKeyword, Brand, Niche, Product
 from app.models.asset import ORIENTATION_VALUES, USAGE_SCOPE_VALUES
+from app.services.ai_asset_enrichment import enrich_asset_with_ai
 from app.services.asset_policy import is_asset_eligible_for_search, resolve_asset_search_policy
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -172,6 +173,25 @@ def search_assets(
         "count": len(assets),
         "limit": limit,
         "assets": [serialize_asset(asset) for asset in assets],
+    }
+
+
+@router.post("/{asset_id}/ai-enrich")
+def api_enrich_asset_with_ai(
+    asset_id: int,
+    _: Annotated[None, Depends(require_asset_hub_api_key)],
+    session: Annotated[Session, Depends(get_db_session)],
+    force: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    asset = enrich_asset_with_ai(session, asset_id, force=force, dry_run=dry_run)
+    return {
+        "id": asset.id,
+        "asset_uid": asset.asset_uid,
+        "ai_enrichment_status": asset.ai_enrichment_status,
+        "ai_enrichment_confidence": asset.ai_enrichment_confidence,
+        "needs_human_review": asset.needs_human_review,
+        "review_reason": asset.review_reason,
     }
 
 

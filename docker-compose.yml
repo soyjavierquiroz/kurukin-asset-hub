@@ -1,6 +1,6 @@
 services:
   web:
-    image: ${WEB_IMAGE:-kurukin-asset-hub-web:asset-preview-enrichment}
+    image: ${WEB_IMAGE:-kurukin-asset-hub-web:ai-asset-enrichment}
     build:
       context: .
       dockerfile: Dockerfile
@@ -15,6 +15,13 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       ASSET_HUB_API_KEY: ${ASSET_HUB_API_KEY:-change-me}
       PREVIEW_STORAGE_DIR: ${PREVIEW_STORAGE_DIR:-/data/previews}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AI_ENRICHMENT_ENABLED: ${AI_ENRICHMENT_ENABLED:-false}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_FRAME_SAMPLE_COUNT: ${AI_FRAME_SAMPLE_COUNT:-8}
+      AI_REVIEW_THRESHOLD: ${AI_REVIEW_THRESHOLD:-0.72}
+      AI_MAX_ASSETS_PER_BATCH: ${AI_MAX_ASSETS_PER_BATCH:-20}
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:

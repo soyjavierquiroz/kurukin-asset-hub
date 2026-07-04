@@ -1,4 +1,5 @@
 from app.models.asset import Asset
+from app.models.asset_ai_analysis import AssetAIAnalysis
 from app.models.asset_allowed_brand import AssetAllowedBrand
 from app.models.asset_collection import AssetCollection
 from app.models.asset_keyword import AssetKeyword
@@ -17,6 +18,7 @@ from app.models.source import Source
 
 __all__ = [
     "Asset",
+    "AssetAIAnalysis",
     "AssetAllowedBrand",
     "AssetCollection",
     "AssetKeyword",

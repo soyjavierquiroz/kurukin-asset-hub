@@ -88,6 +88,23 @@
         <option value="false" {% if filters.auto_select_enabled is sameas false %}selected{% endif %}>Disabled</option>
       </select>
     </label>
+    <label class="text-sm font-medium text-zinc-700">
+      AI status
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="ai_status">
+        <option value="">All</option>
+        {% for value in ai_status_values %}
+          <option value="{{ value }}" {% if filters.ai_status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="text-sm font-medium text-zinc-700">
+      Needs review
+      <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="needs_review">
+        <option value="" {% if filters.needs_review is none %}selected{% endif %}>All</option>
+        <option value="true" {% if filters.needs_review is sameas true %}selected{% endif %}>Yes</option>
+        <option value="false" {% if filters.needs_review is sameas false %}selected{% endif %}>No</option>
+      </select>
+    </label>
     <div class="flex items-end gap-2">
       <button class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" type="submit">Filter</button>
       <a class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" href="/assets">Reset</a>
@@ -103,6 +120,7 @@
           Regenerate existing
         </label>
         <button class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" type="submit">Generate previews for selected</button>
+        <button class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" type="submit" formaction="/assets/ai-enrich-bulk">Run AI for selected</button>
       </div>
     </div>
     <table class="w-full min-w-[960px] text-left text-sm">
@@ -117,6 +135,7 @@
           <th class="px-4 py-3">Orientation</th>
           <th class="px-4 py-3">Duration</th>
           <th class="px-4 py-3">Preview status</th>
+          <th class="px-4 py-3">AI status</th>
           <th class="px-4 py-3">Policy</th>
           <th class="px-4 py-3">Keywords</th>
           <th class="px-4 py-3">Status</th>
@@ -147,6 +166,15 @@
             <td class="px-4 py-3">{{ "%.2f"|format(asset.duration_seconds) if asset.duration_seconds else "-" }}</td>
             <td class="px-4 py-3">{{ asset.preview_status }}</td>
             <td class="px-4 py-3">
+              <div class="text-xs font-medium uppercase text-zinc-600">{{ asset.ai_enrichment_status }}</div>
+              {% if asset.ai_enrichment_confidence is not none %}
+                <div class="mt-1 text-xs text-zinc-500">{{ "%.2f"|format(asset.ai_enrichment_confidence) }}</div>
+              {% endif %}
+              {% if asset.needs_human_review %}
+                <div class="mt-1 inline-flex rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800">needs review</div>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3">
               <div class="text-xs font-medium uppercase text-zinc-600">{{ asset.usage_scope }}</div>
               <div class="mt-1 text-xs {{ 'text-emerald-700' if asset.auto_select_enabled else 'text-red-700' }}">
                 {{ "auto-select on" if asset.auto_select_enabled else "auto-select off" }}
@@ -166,7 +194,7 @@
           </tr>
         {% else %}
           <tr>
-            <td class="px-4 py-8 text-center text-zinc-500" colspan="13">No assets found.</td>
+            <td class="px-4 py-8 text-center text-zinc-500" colspan="14">No assets found.</td>
           </tr>
         {% endfor %}
       </tbody>

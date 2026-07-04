@@ -1,7 +1,8 @@
+from collections import defaultdict
 import math
 import secrets
-from typing import Annotated
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
@@ -15,6 +16,7 @@ from app.config import get_settings
 from app.db import get_db_session
 from app.models import Asset, AssetAllowedBrand, AssetKeyword, Brand, Niche, Product, Source
 from app.models.asset import (
+    AI_ENRICHMENT_STATUS_VALUES,
     ASSET_STATUS_VALUES,
     ASSET_TYPE_VALUES,
     ORIENTATION_VALUES,
@@ -27,6 +29,7 @@ from app.services.asset_preview import (
     preview_output_dir,
     safe_asset_uid,
 )
+from app.services.ai_asset_enrichment import enrich_asset_with_ai
 
 router = APIRouter(tags=["admin"])
 templates = Jinja2Templates(directory="app/templates")
@@ -118,6 +121,8 @@ def assets_index(
     keyword: str | None = None,
     usage_scope: str | None = None,
     auto_select_enabled: bool | None = None,
+    ai_status: str | None = None,
+    needs_review: bool | None = None,
     page: int = 1,
 ):
     page = max(page, 1)
@@ -152,6 +157,10 @@ def assets_index(
         filters.append(Asset.usage_scope == usage_scope)
     if auto_select_enabled is not None:
         filters.append(Asset.auto_select_enabled.is_(auto_select_enabled))
+    if ai_status:
+        filters.append(Asset.ai_enrichment_status == ai_status)
+    if needs_review is not None:
+        filters.append(Asset.needs_human_review.is_(needs_review))
 
     query: Select[tuple[Asset]] = select(Asset).options(
         selectinload(Asset.source),
@@ -197,11 +206,14 @@ def assets_index(
                 "keyword": keyword or "",
                 "usage_scope": usage_scope or "",
                 "auto_select_enabled": auto_select_enabled,
+                "ai_status": ai_status or "",
+                "needs_review": needs_review,
             },
             "type_values": ASSET_TYPE_VALUES,
             "orientation_values": ORIENTATION_VALUES,
             "status_values": ASSET_STATUS_VALUES,
             "usage_scope_values": USAGE_SCOPE_VALUES,
+            "ai_status_values": AI_ENRICHMENT_STATUS_VALUES,
             "pagination_query": build_query_string(
                 {
                     "q": q,
@@ -214,6 +226,8 @@ def assets_index(
                     "keyword": keyword,
                     "usage_scope": usage_scope,
                     "auto_select_enabled": auto_select_enabled,
+                    "ai_status": ai_status,
+                    "needs_review": needs_review,
                 }
             ),
             "page": page,
@@ -244,10 +258,20 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
     )
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    ai_keywords_by_category: dict[str, list[AssetKeyword]] = defaultdict(list)
+    for keyword in sorted(
+        (keyword for keyword in asset.keywords if keyword.source == "ai"),
+        key=lambda item: (item.category, -item.weight, item.keyword),
+    ):
+        ai_keywords_by_category[keyword.category].append(keyword)
     return templates.TemplateResponse(
         request,
         "assets/detail.html",
-        {"page_title": asset.filename, "asset": asset},
+        {
+            "page_title": asset.filename,
+            "asset": asset,
+            "ai_keywords_by_category": dict(ai_keywords_by_category),
+        },
     )
 
 
@@ -261,6 +285,23 @@ def assets_generate_preview(asset_id: int, _: AdminUser, session: DbSession):
     return redirect_to(f"/assets/{asset_id}")
 
 
+@router.post("/assets/{asset_id}/ai-enrich")
+def assets_ai_enrich(
+    asset_id: int,
+    _: AdminUser,
+    session: DbSession,
+    force: Annotated[str | None, Form()] = None,
+    dry_run: Annotated[str | None, Form()] = None,
+):
+    enrich_asset_with_ai(
+        session,
+        asset_id,
+        force=force in {"true", "on"},
+        dry_run=dry_run in {"true", "on"},
+    )
+    return redirect_to(f"/assets/{asset_id}")
+
+
 @router.post("/assets/generate-previews-bulk")
 async def assets_generate_previews_bulk(request: Request, _: AdminUser, session: DbSession):
     form = await request.form()
@@ -269,6 +310,19 @@ async def assets_generate_previews_bulk(request: Request, _: AdminUser, session:
     for raw_id in raw_ids:
         try:
             generate_asset_preview(session, int(raw_id), force=force)
+        except (TypeError, ValueError):
+            continue
+    return redirect_to("/assets")
+
+
+@router.post("/assets/ai-enrich-bulk")
+async def assets_ai_enrich_bulk(request: Request, _: AdminUser, session: DbSession):
+    form = await request.form()
+    raw_ids = form.getlist("asset_ids")
+    force = form.get("force") == "on"
+    for raw_id in raw_ids:
+        try:
+            enrich_asset_with_ai(session, int(raw_id), force=force)
         except (TypeError, ValueError):
             continue
     return redirect_to("/assets")

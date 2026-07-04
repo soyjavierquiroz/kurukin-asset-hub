@@ -24,6 +24,7 @@ from app.models.common import PROVIDER_VALUES, TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.asset_allowed_brand import AssetAllowedBrand
+    from app.models.asset_ai_analysis import AssetAIAnalysis
     from app.models.asset_keyword import AssetKeyword
     from app.models.asset_tag import AssetTag
     from app.models.asset_usage import AssetUsage
@@ -37,6 +38,7 @@ ASSET_TYPE_VALUES = ("video", "image", "audio", "unknown")
 ASSET_STATUS_VALUES = ("active", "inactive", "missing", "archived")
 PREVIEW_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
 TECHNICAL_METADATA_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
+AI_ENRICHMENT_STATUS_VALUES = ("pending", "processing", "ready", "failed", "needs_review", "skipped")
 ORIENTATION_VALUES = ("9:16", "16:9", "square", "unknown")
 OVERLAY_SAFE_AREA_VALUES = ("top", "center", "bottom", "left", "right", "full", "unknown")
 SHOT_TYPE_VALUES = ("closeup", "medium", "wide", "detail", "establishing", "unknown")
@@ -79,6 +81,10 @@ class Asset(TimestampMixin, Base):
         CheckConstraint(
             f"technical_metadata_status in {TECHNICAL_METADATA_STATUS_VALUES}",
             name="ck_assets_technical_metadata_status",
+        ),
+        CheckConstraint(
+            f"ai_enrichment_status in {AI_ENRICHMENT_STATUS_VALUES}",
+            name="ck_assets_ai_enrichment_status",
         ),
         CheckConstraint(f"orientation in {ORIENTATION_VALUES}", name="ck_assets_orientation"),
         CheckConstraint(
@@ -189,6 +195,26 @@ class Asset(TimestampMixin, Base):
     fps: Mapped[float | None] = mapped_column(Float)
     codec: Mapped[str | None] = mapped_column(String(120))
     has_audio: Mapped[bool | None] = mapped_column(Boolean)
+    ai_enrichment_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    ai_enrichment_confidence: Mapped[float | None] = mapped_column(Float)
+    ai_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ai_model: Mapped[str | None] = mapped_column(String(160))
+    ai_error: Mapped[str | None] = mapped_column(Text)
+    needs_human_review: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    review_reason: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(160))
+    enrichment_version: Mapped[str | None] = mapped_column(String(80))
     search_text: Mapped[str | None] = mapped_column(Text)
     embedding_text: Mapped[str | None] = mapped_column(Text)
     negative_keywords: Mapped[str | None] = mapped_column(Text)
@@ -339,6 +365,10 @@ class Asset(TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     keywords: Mapped[list["AssetKeyword"]] = relationship(
+        back_populates="asset",
+        cascade="all, delete-orphan",
+    )
+    ai_analyses: Mapped[list["AssetAIAnalysis"]] = relationship(
         back_populates="asset",
         cascade="all, delete-orphan",
     )

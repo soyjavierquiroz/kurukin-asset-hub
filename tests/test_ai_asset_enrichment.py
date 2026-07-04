@@ -1,0 +1,352 @@
+from __future__ import annotations
+
+from base64 import b64encode
+from collections.abc import Generator
+from pathlib import Path
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.config import get_settings
+from app.db import Base, get_db_session
+from app.main import create_app
+from app.models import Asset, AssetAIAnalysis, AssetKeyword, Source
+from app.schemas.ai_enrichment import AIAssetEnrichmentResult
+from app.services import ai_asset_enrichment
+from app.services.ai_asset_enrichment import AssetImageInputs, enrich_asset_with_ai
+
+
+def auth_header(username: str = "admin", password: str = "change-me") -> dict[str, str]:
+    token = b64encode(f"{username}:{password}".encode()).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
+def make_test_client() -> tuple[TestClient, sessionmaker[Session]]:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def override_session() -> Generator[Session, None, None]:
+        with session_factory() as db_session:
+            yield db_session
+
+    app = create_app()
+    app.dependency_overrides[get_db_session] = override_session
+    return TestClient(app), session_factory
+
+
+def seed_asset(
+    session: Session,
+    uid: str = "asset_ai_001",
+    with_preview: bool = True,
+    asset_type: str = "image",
+) -> Asset:
+    source = Source(
+        source_id=f"source_{uid}",
+        provider="google_drive",
+        label="Drive",
+        rclone_remote="gdrive_code_x",
+        root_path="assets",
+    )
+    asset = Asset(
+        asset_uid=uid,
+        source=source,
+        provider="google_drive",
+        rclone_remote="gdrive_code_x",
+        remote_path=f"assets/{uid}.jpg",
+        filename=f"{uid}.jpg",
+        type=asset_type,
+        preview_path=f"previews/{uid}/preview.jpg" if with_preview else None,
+        thumbnail_path=f"previews/{uid}/thumbnail.jpg" if with_preview else None,
+    )
+    session.add(asset)
+    session.commit()
+    return asset
+
+
+def valid_ai_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "title": "Warm kitchen detail",
+        "visual_description": "A close detail shot of a calm kitchen scene.",
+        "action_description": "Hands arrange a cup on a counter.",
+        "emotion": "calm",
+        "people": "hands only",
+        "location": "kitchen",
+        "best_for": "quiet explanatory b-roll",
+        "avoid_for": "high-energy hooks",
+        "negative_keywords": "chaotic, loud",
+        "shot_type": "detail",
+        "camera_motion": "static",
+        "subject_position": "center",
+        "visual_energy": "low",
+        "pacing": "slow",
+        "best_scene_role": "broll",
+        "has_visible_text": True,
+        "visible_text": "Cafe",
+        "text_language": "en",
+        "has_logo": False,
+        "has_watermark": False,
+        "has_faces": False,
+        "has_hands": True,
+        "has_product": True,
+        "has_directional_motion": False,
+        "safe_for_subtitles": True,
+        "safe_for_text_overlay": True,
+        "overlay_safe_area": "top",
+        "flip_horizontal_allowed": True,
+        "flip_vertical_allowed": False,
+        "crop_allowed": True,
+        "zoom_allowed": True,
+        "speed_change_allowed": True,
+        "reverse_allowed": False,
+        "color_grade_allowed": True,
+        "loopable": True,
+        "similarity_group": "kitchen-calm",
+        "keywords": [
+            {
+                "keyword": "Kitchen",
+                "category": "location",
+                "weight": 1.4,
+                "confidence": 0.91,
+                "language": "en",
+            }
+        ],
+        "search_text": "kitchen calm hands cup",
+        "embedding_text": "Calm kitchen b-roll with hands arranging a cup.",
+        "confidence": 0.92,
+        "needs_human_review": False,
+        "review_reason": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def enable_ai(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_ENRICHMENT_ENABLED", "true")
+    monkeypatch.setenv("AI_MODEL", "test-vision-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret")
+    get_settings.cache_clear()
+
+
+def mock_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ai_asset_enrichment,
+        "collect_asset_images",
+        lambda asset: AssetImageInputs([Path(__file__)], "thumbnail"),
+    )
+
+
+def test_ai_schema_validates_result() -> None:
+    result = AIAssetEnrichmentResult.model_validate(valid_ai_payload())
+
+    assert result.visual_description == "A close detail shot of a calm kitchen scene."
+    assert result.keywords[0].category == "location"
+
+
+def test_ai_schema_rejects_invalid_result() -> None:
+    with pytest.raises(ValidationError):
+        AIAssetEnrichmentResult.model_validate(valid_ai_payload(shot_type="macro"))
+
+
+def test_enrich_asset_skipped_without_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    enable_ai(monkeypatch)
+    client, session_factory = make_test_client()
+    del client
+    with session_factory() as session:
+        asset = seed_asset(session, with_preview=False)
+
+        enriched = enrich_asset_with_ai(session, asset.id)
+
+        assert enriched.ai_enrichment_status == "skipped"
+        assert enriched.review_reason == "Missing preview or thumbnail"
+
+
+def test_enrich_asset_applies_metadata_flags_keywords_and_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_ai(monkeypatch)
+    mock_inputs(monkeypatch)
+    monkeypatch.setattr(
+        ai_asset_enrichment,
+        "call_openai_vision",
+        lambda prompt, paths: AIAssetEnrichmentResult.model_validate(valid_ai_payload()),
+    )
+    client, session_factory = make_test_client()
+    del client
+
+    with session_factory() as session:
+        asset = seed_asset(session)
+        enriched = enrich_asset_with_ai(session, asset.id)
+
+        assert enriched.ai_enrichment_status == "ready"
+        assert enriched.visual_description == "A close detail shot of a calm kitchen scene."
+        assert enriched.best_for == "quiet explanatory b-roll"
+        assert enriched.avoid_for == "high-energy hooks"
+        assert enriched.has_visible_text is True
+        assert enriched.has_logo is False
+        assert enriched.flip_horizontal_allowed is True
+        assert enriched.safe_for_subtitles is True
+        keyword = session.scalar(select(AssetKeyword).where(AssetKeyword.asset_id == asset.id))
+        assert keyword is not None
+        assert keyword.keyword == "kitchen"
+        assert keyword.source == "ai"
+        analysis = session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset.id))
+        assert analysis is not None
+        assert analysis.result_json["visual_description"] == enriched.visual_description
+
+
+def test_force_replaces_ai_keywords_and_preserves_manual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_ai(monkeypatch)
+    mock_inputs(monkeypatch)
+    monkeypatch.setattr(
+        ai_asset_enrichment,
+        "call_openai_vision",
+        lambda prompt, paths: AIAssetEnrichmentResult.model_validate(
+            valid_ai_payload(
+                keywords=[
+                    {
+                        "keyword": "New keyword",
+                        "category": "concept",
+                        "weight": 2.0,
+                        "confidence": 0.9,
+                        "language": "en",
+                    }
+                ]
+            )
+        ),
+    )
+    client, session_factory = make_test_client()
+    del client
+
+    with session_factory() as session:
+        asset = seed_asset(session)
+        session.add_all(
+            [
+                AssetKeyword(
+                    asset=asset,
+                    keyword="old ai",
+                    category="concept",
+                    weight=1.0,
+                    confidence=0.8,
+                    source="ai",
+                    language="en",
+                ),
+                AssetKeyword(
+                    asset=asset,
+                    keyword="manual keeper",
+                    category="concept",
+                    weight=1.0,
+                    confidence=1.0,
+                    source="manual",
+                    language="en",
+                ),
+            ]
+        )
+        session.commit()
+
+        enrich_asset_with_ai(session, asset.id, force=True)
+        keywords = {
+            (keyword.keyword, keyword.source)
+            for keyword in session.scalars(
+                select(AssetKeyword).where(AssetKeyword.asset_id == asset.id)
+            )
+        }
+
+        assert ("old ai", "ai") not in keywords
+        assert ("new keyword", "ai") in keywords
+        assert ("manual keeper", "manual") in keywords
+
+
+def test_failure_marks_asset_failed_and_sanitizes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_ai(monkeypatch)
+    mock_inputs(monkeypatch)
+    monkeypatch.setattr(
+        ai_asset_enrichment,
+        "call_openai_vision",
+        lambda prompt, paths: (_ for _ in ()).throw(RuntimeError("provider failed sk-test-secret")),
+    )
+    client, session_factory = make_test_client()
+    del client
+
+    with session_factory() as session:
+        asset = seed_asset(session)
+        enriched = enrich_asset_with_ai(session, asset.id)
+
+        assert enriched.ai_enrichment_status == "failed"
+        assert "sk-test-secret" not in (enriched.ai_error or "")
+
+
+def test_cli_dry_run_does_not_call_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    enable_ai(monkeypatch)
+    monkeypatch.setattr(
+        ai_asset_enrichment,
+        "call_openai_vision",
+        lambda prompt, paths: pytest.fail("provider should not be called during dry-run"),
+    )
+    client, session_factory = make_test_client()
+    del client
+    with session_factory() as session:
+        asset = seed_asset(session)
+
+    import scripts.enrich_assets_ai as cli
+
+    monkeypatch.setattr(cli, "SessionLocal", session_factory)
+    monkeypatch.setattr(sys, "argv", ["enrich_assets_ai.py", "--asset-id", str(asset.id), "--dry-run"])
+
+    assert cli.main() == 0
+    assert "processed=1" in capsys.readouterr().out
+
+
+def test_ui_detail_shows_ai_section() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        asset = seed_asset(session)
+
+    response = client.get(f"/assets/{asset.id}", headers=auth_header())
+
+    assert response.status_code == 200
+    assert "AI Enrichment" in response.text
+    assert "Run AI Enrichment" in response.text
+
+
+def test_ai_routes_require_auth_and_api_key() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        asset = seed_asset(session)
+
+    web_response = client.post(f"/assets/{asset.id}/ai-enrich")
+    api_response = client.post(f"/api/assets/{asset.id}/ai-enrich")
+
+    assert web_response.status_code == 401
+    assert api_response.status_code == 401
+
+
+def test_api_ai_enrich_accepts_api_key_dry_run() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        asset = seed_asset(session)
+
+    response = client.post(
+        f"/api/assets/{asset.id}/ai-enrich",
+        params={"dry_run": "true"},
+        headers={"X-Asset-Hub-Api-Key": "test-api-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ai_enrichment_status"] == "pending"

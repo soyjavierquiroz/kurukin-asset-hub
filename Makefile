@@ -1,5 +1,5 @@
 STACK_NAME ?= kurukin-asset-hub
-WEB_IMAGE ?= kurukin-asset-hub-web:asset-preview-enrichment
+WEB_IMAGE ?= kurukin-asset-hub-web:ai-asset-enrichment
 WEB_SERVICE ?= $(STACK_NAME)_web
 
 .PHONY: build deploy rm logs ps shell migrate revision test
