@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-from app.schemas.ai_enrichment import AIAssetEnrichmentResult
+from app.schemas.ai_enrichment import AIAssetEnrichmentResult, build_openai_strict_json_schema
 from app.services.asset_preview import sanitize_error_message
 
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
@@ -50,7 +50,7 @@ def call_openai_vision(
                 "format": {
                     "type": "json_schema",
                     "name": "asset_enrichment",
-                    "schema": AIAssetEnrichmentResult.model_json_schema(),
+                    "schema": build_openai_strict_json_schema(AIAssetEnrichmentResult),
                     "strict": True,
                 }
             },

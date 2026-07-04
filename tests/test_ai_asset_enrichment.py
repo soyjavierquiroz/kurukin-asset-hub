@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from base64 import b64encode
 from collections.abc import Generator
+import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,8 +18,9 @@ from app.config import get_settings
 from app.db import Base, get_db_session
 from app.main import create_app
 from app.models import Asset, AssetAIAnalysis, AssetKeyword, Source
-from app.schemas.ai_enrichment import AIAssetEnrichmentResult
+from app.schemas.ai_enrichment import AIAssetEnrichmentResult, build_openai_strict_json_schema
 from app.services import ai_asset_enrichment
+from app.services.ai_providers import openai_provider
 from app.services.ai_asset_enrichment import AssetImageInputs, enrich_asset_with_ai
 
 
@@ -137,6 +140,31 @@ def enable_ai(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
+def contains_key(schema: object, key: str) -> bool:
+    if isinstance(schema, dict):
+        return key in schema or any(contains_key(value, key) for value in schema.values())
+    if isinstance(schema, list):
+        return any(contains_key(value, key) for value in schema)
+    return False
+
+
+def collect_object_schemas(schema: object) -> list[dict[str, object]]:
+    objects: list[dict[str, object]] = []
+
+    def visit(node: object) -> None:
+        if isinstance(node, dict):
+            if isinstance(node.get("properties"), dict):
+                objects.append(node)
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(schema)
+    return objects
+
+
 def mock_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ai_asset_enrichment,
@@ -155,6 +183,74 @@ def test_ai_schema_validates_result() -> None:
 def test_ai_schema_rejects_invalid_result() -> None:
     with pytest.raises(ValidationError):
         AIAssetEnrichmentResult.model_validate(valid_ai_payload(shot_type="macro"))
+
+
+def test_openai_strict_schema_root_requires_all_properties() -> None:
+    schema = build_openai_strict_json_schema(AIAssetEnrichmentResult)
+
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
+
+
+def test_openai_strict_schema_keyword_requires_all_properties() -> None:
+    schema = build_openai_strict_json_schema(AIAssetEnrichmentResult)
+    keyword_schema = schema["$defs"]["AIKeyword"]
+
+    assert set(keyword_schema["required"]) == set(keyword_schema["properties"])
+    assert {
+        "keyword",
+        "category",
+        "weight",
+        "confidence",
+        "language",
+    }.issubset(keyword_schema["required"])
+
+
+def test_openai_strict_schema_removes_defaults() -> None:
+    schema = build_openai_strict_json_schema(AIAssetEnrichmentResult)
+
+    assert not contains_key(schema, "default")
+
+
+def test_openai_strict_schema_requires_every_object_property() -> None:
+    schema = build_openai_strict_json_schema(AIAssetEnrichmentResult)
+
+    for object_schema in collect_object_schemas(schema):
+        assert set(object_schema["required"]) == set(object_schema["properties"])
+        assert object_schema["additionalProperties"] is False
+
+
+def test_openai_provider_sends_strict_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    enable_ai(monkeypatch)
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        def create(self, **kwargs: object) -> object:
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(output_text=json.dumps(valid_ai_payload()))
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            captured["client_kwargs"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    result = openai_provider.call_openai_vision("prompt", [Path(__file__)])
+
+    request = captured["kwargs"]
+    assert isinstance(request, dict)
+    text = request["text"]
+    assert isinstance(text, dict)
+    response_format = text["format"]
+    assert isinstance(response_format, dict)
+    schema = response_format["schema"]
+    assert response_format["name"] == "asset_enrichment"
+    assert response_format["strict"] is True
+    assert isinstance(schema, dict)
+    assert set(schema["required"]) == set(schema["properties"])
+    assert not contains_key(schema, "default")
+    assert result.keywords[0].keyword == "Kitchen"
 
 
 def test_enrich_asset_skipped_without_preview(monkeypatch: pytest.MonkeyPatch) -> None:

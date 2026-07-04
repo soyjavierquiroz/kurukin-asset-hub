@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -86,3 +87,41 @@ class AIAssetEnrichmentResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     needs_human_review: bool
     review_reason: str | None = None
+
+
+def build_openai_strict_json_schema(model_class: type[BaseModel]) -> dict[str, Any]:
+    schema = model_class.model_json_schema()
+    _normalize_openai_strict_json_schema(schema)
+    return schema
+
+
+def _normalize_openai_strict_json_schema(schema: Any) -> None:
+    if not isinstance(schema, dict):
+        return
+
+    schema.pop("default", None)
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        schema["required"] = list(properties.keys())
+        schema["additionalProperties"] = False
+        for property_schema in properties.values():
+            _normalize_openai_strict_json_schema(property_schema)
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _normalize_openai_strict_json_schema(items)
+    elif isinstance(items, list):
+        for item_schema in items:
+            _normalize_openai_strict_json_schema(item_schema)
+
+    for key in ("anyOf", "oneOf", "allOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list):
+            for variant_schema in variants:
+                _normalize_openai_strict_json_schema(variant_schema)
+
+    defs = schema.get("$defs")
+    if isinstance(defs, dict):
+        for def_schema in defs.values():
+            _normalize_openai_strict_json_schema(def_schema)
