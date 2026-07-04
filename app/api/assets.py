@@ -9,9 +9,11 @@ from app.config import get_settings
 from app.db import get_db_session
 from app.models import Asset, AssetAllowedBrand, Brand, Niche, Product
 from app.models.asset import ORIENTATION_VALUES, USAGE_SCOPE_VALUES
+from app.schemas.asset_selection import AssetSelectionRequest, AssetSelectionResponse
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
-from app.services.asset_search import score_asset_for_query, tokenize_query
 from app.services.asset_policy import is_asset_eligible_for_search, resolve_asset_search_policy
+from app.services.asset_search import score_asset_for_query, tokenize_query
+from app.services.asset_selection import select_assets
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
@@ -168,6 +170,20 @@ def search_assets(
         "limit": limit,
         "assets": [serialize_asset(asset, score=score) for asset, score in scored_assets],
     }
+
+
+@router.post("/select", response_model=AssetSelectionResponse)
+def api_select_assets(
+    request: AssetSelectionRequest,
+    _: Annotated[None, Depends(require_asset_hub_api_key)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> AssetSelectionResponse:
+    if request.include_restricted:
+        raise HTTPException(
+            status_code=422,
+            detail="include_restricted is not supported for asset selection",
+        )
+    return select_assets(session, request)
 
 
 @router.post("/{asset_id}/ai-enrich")

@@ -125,6 +125,34 @@ Parámetros principales:
 
 Reglas clave: `restricted` nunca aparece, `auto_select_enabled=false` nunca aparece, `brand_exclusive` de otra marca no aparece, y assets globales sólo aparecen si el request y la policy efectiva lo permiten.
 
+## Asset selection API
+
+`GET /api/assets/search` es exploratorio: permite inspeccionar candidatos por texto, marca, producto, tipo y orientación. `POST /api/assets/select` está pensado para render jobs: recibe contexto de escena, respeta las mismas policies de marca/producto, rankea por utilidad creativa y devuelve una lista diversificada para que un worker futuro pueda copiar, descargar o renderizar.
+
+`POST /api/assets/select` requiere `X-Asset-Hub-Api-Key`. `brand_slug` es obligatorio; si una marca o producto no existe, responde `200` con `count=0` y `assets=[]`. La API no copia archivos todavía y no publica media sin autenticación: `thumbnail_url` y `preview_url` son informativos y apuntan a rutas internas bajo `/media/previews/...`, protegidas por Basic Auth en la UI.
+
+Ejemplo para Grandiosa Mujer / Veyra:
+
+```bash
+curl -sS \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-Asset-Hub-Api-Key: ${ASSET_HUB_API_KEY}" \
+  https://assets.kuruk.in/api/assets/select \
+  -d '{
+    "brand_slug": "grandiosa_mujer",
+    "product_slug": "veyra",
+    "script_scene": "Veyra revela energía mística mientras mira el celular",
+    "asset_type": "video",
+    "orientation": "9:16",
+    "count": 3,
+    "require_preview_ready": true,
+    "allow_needs_review": true
+  }'
+```
+
+La respuesta incluye `rclone_remote` y `remote_path` para que un worker futuro sepa dónde está el master, junto con metadata técnica/editorial, flags de transformación permitida, `score` y `match_reasons`. `include_restricted=true` se rechaza en este MVP; assets `restricted`, `rights_status=restricted` o `auto_select_enabled=false` nunca son seleccionados.
+
 ## Admin UI
 
 La UI interna vive en `/` y está renderizada con FastAPI, Jinja2, HTMX y Tailwind CDN. Permite revisar conteos del catálogo, filtrar assets, ver detalle técnico/editorial/transformación/seguridad y administrar sources, brands, products y niches con formularios server-rendered.
