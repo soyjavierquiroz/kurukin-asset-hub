@@ -244,6 +244,61 @@ curl -sS \
   https://assets.kuruk.in/api/jobs/asset-bundles/jab_xxx/renderer-manifest
 ```
 
+## Renderer Manifest Contract
+
+Endpoint principal:
+
+```text
+GET /api/jobs/asset-bundles/{bundle_uid}/renderer-manifest
+```
+
+El contrato estable actual usa `manifest_version: "1.0"` y está pensado para que un
+renderer externo consuma assets materializados sin leer la DB ni conocer la lógica interna
+de Asset Hub.
+
+Un renderer debe leer `scenes` en orden y, dentro de cada escena, consumir `assets` por
+`rank`. Cada asset incluye `local_path`, `relative_path`, metadatos creativos, permisos de
+transformación, `recommended_transform` y `render_warnings`. `local_path` es un path dentro
+del contenedor/volumen, no una URL pública.
+
+Para un renderer en otro contenedor, montar el mismo volumen en modo read-only:
+
+```text
+kurukin-asset-hub_job_assets:/data/job-assets:ro
+```
+
+El renderer no debe leer PostgreSQL. Tampoco necesita rclone cuando el bundle ya fue
+materializado: debe usar `local_path` o combinar `storage.storage_dir` con `relative_path`.
+`recommended_transform` resume decisiones seguras como `crop_mode`, `scale_mode`,
+`allow_zoom`, `allow_speed_change` y `subtitle_safe_area`. `render_warnings` permite
+degradar o rechazar assets que requieran revisión, tengan texto visible, watermark o archivo
+materializado faltante.
+
+Ejemplo curl:
+
+```bash
+curl -sS \
+  -H "X-Asset-Hub-Api-Key: ${ASSET_HUB_API_KEY}" \
+  https://assets.kuruk.in/api/jobs/asset-bundles/jab_xxx/renderer-manifest
+```
+
+Schema JSON del contrato:
+
+```bash
+curl -sS \
+  -H "X-Asset-Hub-Api-Key: ${ASSET_HUB_API_KEY}" \
+  https://assets.kuruk.in/api/renderer-manifest/schema
+```
+
+Ejemplo de contenedor renderer con volumen read-only:
+
+```bash
+docker run --rm \
+  -v kurukin-asset-hub_job_assets:/data/job-assets:ro \
+  renderer-image:latest \
+  renderer --manifest /data/job-assets/jab_xxx/manifests/renderer-manifest.json
+```
+
 ## Admin UI
 
 La UI interna vive en `/` y está renderizada con FastAPI, Jinja2, HTMX y Tailwind CDN. Permite revisar conteos del catálogo, filtrar assets, ver detalle técnico/editorial/transformación/seguridad y administrar sources, brands, products y niches con formularios server-rendered.

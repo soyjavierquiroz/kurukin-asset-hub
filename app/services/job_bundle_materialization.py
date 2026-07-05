@@ -13,7 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
-from app.models import JobAssetBundle, JobAssetBundleItem
+from app.models import Asset, JobAssetBundle, JobAssetBundleItem
+from app.services.renderer_manifest import (
+    build_renderer_manifest,
+    ordered_bundle_items,
+    validate_renderer_manifest_contract,
+)
 from app.services.rclone_service import RcloneError, RcloneService, sanitize_rclone_message
 
 
@@ -111,10 +116,7 @@ def materialize_job_asset_bundle(
 
     bundle.materialized_assets_dir = f"job-assets/{bundle.bundle_uid}"
     bundle.materialized_at = now
-    manifest = build_renderer_manifest(bundle)
-    bundle.renderer_manifest_json = manifest
-    manifest_path = manifests_dir / "renderer-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    persist_renderer_manifest(bundle)
     session.flush()
     return build_materialization_response(bundle)
 
@@ -126,41 +128,29 @@ def get_bundle_materialization(session: Session, bundle_uid: str) -> dict[str, A
     return build_materialization_response(bundle)
 
 
-def build_renderer_manifest(bundle: JobAssetBundle) -> dict[str, Any]:
-    scenes_by_id = {
-        str(scene.get("scene_id")): scene
-        for scene in bundle.manifest_json.get("scenes", [])
-        if isinstance(scene, dict) and scene.get("scene_id") is not None
-    }
-    scene_groups: dict[tuple[int, str], dict[str, Any]] = {}
-    for item in ordered_bundle_items(bundle):
-        scene_index = item.scene_index if item.scene_index is not None else 0
-        key = (scene_index, item.scene_id)
-        source_scene = scenes_by_id.get(item.scene_id, {})
-        scene = scene_groups.setdefault(
-            key,
-            {
-                "scene_id": item.scene_id,
-                "scene_index": item.scene_index,
-                "script_scene": source_scene.get("script_scene"),
-                "assets": [],
-            },
-        )
-        scene["assets"].append(serialize_manifest_item(item))
+def get_renderer_manifest(session: Session, bundle_uid: str) -> dict[str, Any]:
+    bundle = load_bundle(session, bundle_uid)
+    if bundle is None:
+        raise JobBundleMaterializationNotFoundError("Bundle not found")
+    if is_renderer_manifest_v1(bundle.renderer_manifest_json):
+        validate_renderer_manifest_contract(bundle.renderer_manifest_json)
+        return bundle.renderer_manifest_json
+    if bundle.materialization_status == "ready" and bundle.items:
+        return persist_renderer_manifest(bundle)
+    raise JobBundleMaterializationNotFoundError("Renderer manifest not found")
 
-    return {
-        "bundle_uid": bundle.bundle_uid,
-        "job_id": bundle.job_id,
-        "brand_slug": bundle.brand.slug if bundle.brand else bundle.manifest_json.get("brand_slug"),
-        "product_slug": (
-            bundle.product.slug if bundle.product else bundle.manifest_json.get("product_slug")
-        ),
-        "materialized_at": (
-            bundle.materialized_at.isoformat() if bundle.materialized_at else None
-        ),
-        "storage_dir": bundle.materialized_assets_dir,
-        "scenes": [scene_groups[key] for key in sorted(scene_groups)],
-    }
+
+def is_renderer_manifest_v1(manifest: dict[str, Any] | None) -> bool:
+    return isinstance(manifest, dict) and manifest.get("manifest_version") == "1.0"
+
+
+def persist_renderer_manifest(bundle: JobAssetBundle) -> dict[str, Any]:
+    manifest = build_renderer_manifest(bundle)
+    bundle.renderer_manifest_json = manifest
+    manifest_path = get_bundle_storage_dir(bundle.bundle_uid) / "manifests" / "renderer-manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
 
 
 def safe_materialized_filename(asset_id: int | None, asset_uid: str | None, filename: str) -> str:
@@ -255,68 +245,11 @@ def load_bundle(session: Session, bundle_uid: str) -> JobAssetBundle | None:
         .options(
             selectinload(JobAssetBundle.brand),
             selectinload(JobAssetBundle.product),
-            selectinload(JobAssetBundle.items).selectinload(JobAssetBundleItem.asset),
+            selectinload(JobAssetBundle.items)
+            .selectinload(JobAssetBundleItem.asset)
+            .selectinload(Asset.source),
         )
     )
-
-
-def ordered_bundle_items(bundle: JobAssetBundle) -> list[JobAssetBundleItem]:
-    return sorted(
-        bundle.items,
-        key=lambda item: (
-            item.scene_index if item.scene_index is not None else 999999,
-            item.scene_id,
-            item.rank if item.rank is not None else 999999,
-            item.id,
-        ),
-    )
-
-
-def serialize_manifest_item(item: JobAssetBundleItem) -> dict[str, Any]:
-    selection = item.selection_json or {}
-    asset = item.asset
-    return {
-        "asset_id": item.asset_id or selection.get("id"),
-        "asset_uid": item.asset_uid or selection.get("asset_uid"),
-        "filename": selection.get("filename") or (asset.filename if asset else None),
-        "scene_id": item.scene_id,
-        "rank": item.rank,
-        "type": selection.get("type") or (asset.type if asset else None),
-        "duration_seconds": selection.get("duration_seconds")
-        if selection.get("duration_seconds") is not None
-        else (asset.duration_seconds if asset else None),
-        "orientation": selection.get("orientation") or (asset.orientation if asset else None),
-        "width": (
-            selection.get("width")
-            if selection.get("width") is not None
-            else (asset.width if asset else None)
-        ),
-        "height": (
-            selection.get("height")
-            if selection.get("height") is not None
-            else (asset.height if asset else None)
-        ),
-        "score": item.score,
-        "match_reasons": item.match_reasons or selection.get("match_reasons") or [],
-        "rclone_remote": selection.get("rclone_remote") or (asset.rclone_remote if asset else None),
-        "remote_path": selection.get("remote_path") or (asset.remote_path if asset else None),
-        "local_path": item.local_path,
-        "relative_path": item.relative_path,
-        "size_bytes": item.materialized_size_bytes,
-        "sha256": item.materialized_sha256,
-        "needs_human_review": selection.get("needs_human_review")
-        if selection.get("needs_human_review") is not None
-        else (asset.needs_human_review if asset else None),
-        "safe_for_subtitles": asset.safe_for_subtitles if asset else None,
-        "safe_for_text_overlay": asset.safe_for_text_overlay if asset else None,
-        "overlay_safe_area": asset.overlay_safe_area if asset else None,
-        "flip_horizontal_allowed": asset.flip_horizontal_allowed if asset else None,
-        "crop_allowed": asset.crop_allowed if asset else None,
-        "zoom_allowed": asset.zoom_allowed if asset else None,
-        "speed_change_allowed": asset.speed_change_allowed if asset else None,
-        "reverse_allowed": asset.reverse_allowed if asset else None,
-        "color_grade_allowed": asset.color_grade_allowed if asset else None,
-    }
 
 
 def build_materialization_response(bundle: JobAssetBundle) -> dict[str, Any]:

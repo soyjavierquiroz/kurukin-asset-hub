@@ -22,6 +22,7 @@ from app.services.job_bundle_materialization import (
     JobBundleMaterializationNotFoundError,
     JobBundleMaterializationValidationError,
     get_bundle_materialization,
+    get_renderer_manifest,
     materialize_job_asset_bundle,
 )
 
@@ -141,12 +142,16 @@ def api_get_job_asset_bundle_renderer_manifest(
     _: Annotated[None, Depends(require_asset_hub_api_key)],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> dict[str, object]:
-    bundle = get_job_asset_bundle_by_uid(session, bundle_uid)
-    if bundle is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bundle not found")
-    if bundle.renderer_manifest_json is None:
+    try:
+        manifest = get_renderer_manifest(session, bundle_uid)
+        session.commit()
+    except JobBundleMaterializationNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Renderer manifest not found",
-        )
-    return bundle.renderer_manifest_json
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+    return manifest
