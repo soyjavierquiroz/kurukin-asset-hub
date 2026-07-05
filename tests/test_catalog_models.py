@@ -17,6 +17,7 @@ from app.models import (
     BrandAssetPolicy,
     Collection,
     JobAssetBundle,
+    JobAssetBundleItem,
     Niche,
     Product,
     ProductAssetPolicy,
@@ -83,11 +84,12 @@ def test_import_all_catalog_models() -> None:
         AssetCollection,
         AssetUsage,
         JobAssetBundle,
+        JobAssetBundleItem,
         BrandAssetPolicy,
         ProductAssetPolicy,
     }
 
-    assert len(models) == 16
+    assert len(models) == 17
 
 
 def test_create_brand_product_niche_auth_profile_source_asset(session: Session) -> None:

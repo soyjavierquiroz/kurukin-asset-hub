@@ -1,10 +1,38 @@
-from sqlalchemy import CheckConstraint, String, text
-from sqlalchemy.orm import Mapped, mapped_column
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.common import TimestampMixin
 
-JOB_ASSET_BUNDLE_STATUS_VALUES = ("prepared", "failed", "cleaned")
+if TYPE_CHECKING:
+    from app.models.asset import Asset
+    from app.models.brand import Brand
+    from app.models.niche import Niche
+    from app.models.product import Product
+
+JOB_ASSET_BUNDLE_STATUS_VALUES = (
+    "ready",
+    "failed",
+    "partial",
+    "superseded",
+    "prepared",
+    "cleaned",
+)
 
 
 class JobAssetBundle(TimestampMixin, Base):
@@ -14,15 +42,79 @@ class JobAssetBundle(TimestampMixin, Base):
             f"status in {JOB_ASSET_BUNDLE_STATUS_VALUES}",
             name="ck_job_asset_bundles_status",
         ),
+        Index("ix_job_asset_bundles_job_id", "job_id"),
+        Index("ix_job_asset_bundles_brand_id", "brand_id"),
+        Index("ix_job_asset_bundles_product_id", "product_id"),
+        Index("ix_job_asset_bundles_niche_id", "niche_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    job_id: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    bundle_uid: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    job_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    brand_id: Mapped[int | None] = mapped_column(ForeignKey("brands.id"))
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"))
+    niche_id: Mapped[int | None] = mapped_column(ForeignKey("niches.id"))
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
-        default="prepared",
-        server_default=text("'prepared'"),
+        default="ready",
+        server_default=text("'ready'"),
     )
-    output_dir: Mapped[str] = mapped_column(String(1200), nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    total_scenes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    total_assets: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    created_by: Mapped[str | None] = mapped_column(String(160))
+    error: Mapped[str | None] = mapped_column(Text)
+    output_dir: Mapped[str | None] = mapped_column(String(1200))
     manifest_path: Mapped[str | None] = mapped_column(String(1200))
+
+    brand: Mapped["Brand | None"] = relationship()
+    product: Mapped["Product | None"] = relationship()
+    niche: Mapped["Niche | None"] = relationship()
+    items: Mapped[list["JobAssetBundleItem"]] = relationship(
+        back_populates="bundle",
+        cascade="all, delete-orphan",
+        order_by="JobAssetBundleItem.id",
+    )
+
+
+class JobAssetBundleItem(Base):
+    __tablename__ = "job_asset_bundle_items"
+    __table_args__ = (
+        Index("ix_job_asset_bundle_items_bundle_id", "bundle_id"),
+        Index("ix_job_asset_bundle_items_scene_id", "scene_id"),
+        Index("ix_job_asset_bundle_items_asset_id", "asset_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bundle_id: Mapped[int] = mapped_column(
+        ForeignKey("job_asset_bundles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scene_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    scene_index: Mapped[int | None] = mapped_column(Integer)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id"))
+    asset_uid: Mapped[str | None] = mapped_column(String(160))
+    score: Mapped[float | None] = mapped_column(Float)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    match_reasons: Mapped[list[str] | None] = mapped_column(JSON)
+    selection_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    bundle: Mapped["JobAssetBundle"] = relationship(back_populates="items")
+    asset: Mapped["Asset | None"] = relationship()

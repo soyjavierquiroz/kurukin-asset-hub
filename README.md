@@ -153,6 +153,59 @@ curl -sS \
 
 La respuesta incluye `rclone_remote` y `remote_path` para que un worker futuro sepa dónde está el master, junto con metadata técnica/editorial, flags de transformación permitida, `score` y `match_reasons`. `include_restricted=true` se rechaza en este MVP; assets `restricted`, `rights_status=restricted` o `auto_select_enabled=false` nunca son seleccionados.
 
+## Job Asset Bundles
+
+`POST /api/assets/select` selecciona assets para una escena individual. `POST /api/jobs/asset-bundles` crea un manifest persistente para un job completo: guarda cada escena, los assets seleccionados, `score`, `match_reasons` y la metadata necesaria para que un worker futuro reproduzca la selección.
+
+La API de bundles no copia masters todavía. Devuelve y persiste `rclone_remote` + `remote_path` para que un renderer futuro pueda resolver los archivos desde el remote autorizado. Si `force=false`, se reutiliza el último bundle `ready` del mismo `job_id`; si `force=true`, se genera un bundle nuevo y los anteriores del job quedan `superseded`.
+
+Ejemplo para Grandiosa Mujer / Veyra:
+
+```bash
+curl -sS \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-Asset-Hub-Api-Key: ${ASSET_HUB_API_KEY}" \
+  https://assets.kuruk.in/api/jobs/asset-bundles \
+  -d '{
+    "job_id": "mpt-test-veyra-001",
+    "brand_slug": "grandiosa_mujer",
+    "product_slug": "veyra",
+    "force": true,
+    "created_by": "manual-test",
+    "scenes": [
+      {
+        "scene_id": "scene-001",
+        "scene_index": 1,
+        "script_scene": "Veyra revela energía mística mientras mira el celular",
+        "asset_type": "video",
+        "orientation": "9:16",
+        "count": 2,
+        "require_preview_ready": true,
+        "allow_needs_review": true
+      },
+      {
+        "scene_id": "scene-002",
+        "scene_index": 2,
+        "script_scene": "Veyra habla por teléfono en un ambiente místico",
+        "asset_type": "video",
+        "orientation": "9:16",
+        "count": 2,
+        "require_preview_ready": true,
+        "allow_needs_review": false
+      }
+    ]
+  }'
+```
+
+Consultar un bundle:
+
+```bash
+curl -sS \
+  -H "X-Asset-Hub-Api-Key: ${ASSET_HUB_API_KEY}" \
+  https://assets.kuruk.in/api/jobs/mpt-test-veyra-001/asset-bundle
+```
+
 ## Admin UI
 
 La UI interna vive en `/` y está renderizada con FastAPI, Jinja2, HTMX y Tailwind CDN. Permite revisar conteos del catálogo, filtrar assets, ver detalle técnico/editorial/transformación/seguridad y administrar sources, brands, products y niches con formularios server-rendered.
