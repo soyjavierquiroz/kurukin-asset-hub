@@ -206,6 +206,44 @@ curl -sS \
   https://assets.kuruk.in/api/jobs/mpt-test-veyra-001/asset-bundle
 ```
 
+## Job Bundle Materialization
+
+Un Job Asset Bundle selecciona assets y conserva `rclone_remote` + `remote_path`.
+La materialización copia sólo esos masters seleccionados al volumen local persistente; no copia
+toda la biblioteca y no publica archivos materializados como rutas públicas.
+
+La configuración de rclone queda fuera del repo. `rclone.conf` no se commitea ni se monta en el
+servicio web por defecto. La API de materialización sólo funciona si `RCLONE_CONFIG` existe dentro
+del contenedor; si falta, responde con un error claro sin tumbar la app. El método recomendado por
+ahora es la CLI con `rclone.conf` montado read-only.
+
+Volumen persistente:
+
+```text
+kurukin-asset-hub_job_assets:/data/job-assets
+```
+
+CLI recomendado:
+
+```bash
+docker run --rm \
+  --env-file .env \
+  --network kurukin-asset-hub_asset_hub_internal \
+  -v /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro \
+  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
+  -v kurukin-asset-hub_job_assets:/data/job-assets \
+  kurukin-asset-hub-web:job-bundle-materialization \
+  python scripts/materialize_job_bundle.py --bundle-uid jab_xxx --force
+```
+
+Obtener el renderer manifest:
+
+```bash
+curl -sS \
+  -H "X-Asset-Hub-Api-Key: ${ASSET_HUB_API_KEY}" \
+  https://assets.kuruk.in/api/jobs/asset-bundles/jab_xxx/renderer-manifest
+```
+
 ## Admin UI
 
 La UI interna vive en `/` y está renderizada con FastAPI, Jinja2, HTMX y Tailwind CDN. Permite revisar conteos del catálogo, filtrar assets, ver detalle técnico/editorial/transformación/seguridad y administrar sources, brands, products y niches con formularios server-rendered.

@@ -13,5 +13,7 @@ dist/
 build/
 data/
 previews/
+data/job-assets/
+job-assets/
 *.preview.jpg
 *.thumbnail.jpg

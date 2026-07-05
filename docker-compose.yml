@@ -1,6 +1,6 @@
 services:
   web:
-    image: ${WEB_IMAGE:-kurukin-asset-hub-web:ai-asset-enrichment}
+    image: ${WEB_IMAGE:-kurukin-asset-hub-web:job-bundle-materialization}
     build:
       context: .
       dockerfile: Dockerfile
@@ -15,6 +15,8 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       ASSET_HUB_API_KEY: ${ASSET_HUB_API_KEY:-change-me}
       PREVIEW_STORAGE_DIR: ${PREVIEW_STORAGE_DIR:-/data/previews}
+      JOB_ASSETS_STORAGE_DIR: ${JOB_ASSETS_STORAGE_DIR:-/data/job-assets}
+      JOB_ASSET_MATERIALIZATION_ENABLED: ${JOB_ASSET_MATERIALIZATION_ENABLED:-true}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_ENRICHMENT_ENABLED: ${AI_ENRICHMENT_ENABLED:-false}
       AI_PROVIDER: ${AI_PROVIDER:-openai}
@@ -26,6 +28,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - previews:/data/previews
+      - job_assets:/data/job-assets
     networks:
       - asset_hub_internal
       - traefik_public
@@ -80,3 +83,4 @@ networks:
 volumes:
   asset_hub_postgres_data:
   previews:
+  job_assets:

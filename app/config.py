@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     admin_password: str = Field(default="change-me", alias="ADMIN_PASSWORD")
     asset_hub_api_key: str = Field(default="change-me", alias="ASSET_HUB_API_KEY")
     preview_storage_dir: str = Field(default="/data/previews", alias="PREVIEW_STORAGE_DIR")
+    job_assets_storage_dir: str = Field(
+        default="/data/job-assets",
+        alias="JOB_ASSETS_STORAGE_DIR",
+    )
+    job_asset_materialization_enabled: bool = Field(
+        default=True,
+        alias="JOB_ASSET_MATERIALIZATION_ENABLED",
+    )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     ai_enrichment_enabled: bool = Field(default=False, alias="AI_ENRICHMENT_ENABLED")
     ai_provider: str = Field(default="openai", alias="AI_PROVIDER")

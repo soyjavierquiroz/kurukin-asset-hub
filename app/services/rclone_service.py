@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import re
 import subprocess
 from typing import Any
@@ -12,7 +13,14 @@ class RcloneService:
     def __init__(self, binary: str = "rclone") -> None:
         self.binary = binary
 
-    def copyto(self, remote: str, remote_path: str, local_path: str) -> None:
+    def copyto(
+        self,
+        remote: str,
+        remote_path: str,
+        local_path: str,
+        timeout: int = 900,
+    ) -> None:
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
         source = self._target(remote, remote_path)
         command = [
             self.binary,
@@ -20,7 +28,7 @@ class RcloneService:
             source,
             local_path,
         ]
-        self._run(command, operation="copyto", timeout=900)
+        self._run(command, operation="copyto", timeout=timeout)
 
     def list_json(self, remote: str, root: str) -> list[dict[str, Any]]:
         target = self._target(remote, root)

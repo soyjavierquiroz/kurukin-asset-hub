@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    BigInteger,
     String,
     Text,
     func,
@@ -33,6 +34,21 @@ JOB_ASSET_BUNDLE_STATUS_VALUES = (
     "prepared",
     "cleaned",
 )
+JOB_ASSET_BUNDLE_MATERIALIZATION_STATUS_VALUES = (
+    "pending",
+    "processing",
+    "ready",
+    "failed",
+    "partial",
+    "skipped",
+)
+JOB_ASSET_BUNDLE_ITEM_MATERIALIZATION_STATUS_VALUES = (
+    "pending",
+    "processing",
+    "ready",
+    "failed",
+    "skipped",
+)
 
 
 class JobAssetBundle(TimestampMixin, Base):
@@ -41,6 +57,10 @@ class JobAssetBundle(TimestampMixin, Base):
         CheckConstraint(
             f"status in {JOB_ASSET_BUNDLE_STATUS_VALUES}",
             name="ck_job_asset_bundles_status",
+        ),
+        CheckConstraint(
+            f"materialization_status in {JOB_ASSET_BUNDLE_MATERIALIZATION_STATUS_VALUES}",
+            name="ck_job_asset_bundles_materialization_status",
         ),
         Index("ix_job_asset_bundles_job_id", "job_id"),
         Index("ix_job_asset_bundles_brand_id", "brand_id"),
@@ -78,6 +98,16 @@ class JobAssetBundle(TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text)
     output_dir: Mapped[str | None] = mapped_column(String(1200))
     manifest_path: Mapped[str | None] = mapped_column(String(1200))
+    materialization_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    materialized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    materialization_error: Mapped[str | None] = mapped_column(Text)
+    materialized_assets_dir: Mapped[str | None] = mapped_column(String(1200))
+    renderer_manifest_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
     brand: Mapped["Brand | None"] = relationship()
     product: Mapped["Product | None"] = relationship()
@@ -92,6 +122,10 @@ class JobAssetBundle(TimestampMixin, Base):
 class JobAssetBundleItem(Base):
     __tablename__ = "job_asset_bundle_items"
     __table_args__ = (
+        CheckConstraint(
+            f"materialization_status in {JOB_ASSET_BUNDLE_ITEM_MATERIALIZATION_STATUS_VALUES}",
+            name="ck_job_asset_bundle_items_materialization_status",
+        ),
         Index("ix_job_asset_bundle_items_bundle_id", "bundle_id"),
         Index("ix_job_asset_bundle_items_scene_id", "scene_id"),
         Index("ix_job_asset_bundle_items_asset_id", "asset_id"),
@@ -110,6 +144,18 @@ class JobAssetBundleItem(Base):
     rank: Mapped[int | None] = mapped_column(Integer)
     match_reasons: Mapped[list[str] | None] = mapped_column(JSON)
     selection_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    materialization_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    local_path: Mapped[str | None] = mapped_column(String(1200))
+    relative_path: Mapped[str | None] = mapped_column(String(1200))
+    materialized_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    materialized_sha256: Mapped[str | None] = mapped_column(String(128))
+    materialized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    materialization_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
