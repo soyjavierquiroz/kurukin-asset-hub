@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 ASSET_TYPE_VALUES = ("video", "image", "audio", "unknown")
 ASSET_STATUS_VALUES = ("active", "inactive", "missing", "archived")
+SOURCE_STATUS_VALUES = ("active", "missing", "inaccessible", "deleted", "moved", "changed")
 PREVIEW_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
 TECHNICAL_METADATA_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
 AI_ENRICHMENT_STATUS_VALUES = ("pending", "processing", "ready", "failed", "needs_review", "skipped")
@@ -74,6 +75,10 @@ class Asset(TimestampMixin, Base):
         CheckConstraint(f"provider in {PROVIDER_VALUES}", name="ck_assets_provider"),
         CheckConstraint(f"type in {ASSET_TYPE_VALUES}", name="ck_assets_type"),
         CheckConstraint(f"status in {ASSET_STATUS_VALUES}", name="ck_assets_status"),
+        CheckConstraint(
+            f"source_status in {SOURCE_STATUS_VALUES}",
+            name="ck_assets_source_status",
+        ),
         CheckConstraint(
             f"preview_status in {PREVIEW_STATUS_VALUES}",
             name="ck_assets_preview_status",
@@ -124,6 +129,8 @@ class Asset(TimestampMixin, Base):
         Index("ix_assets_filename", "filename"),
         Index("ix_assets_last_used_at", "last_used_at"),
         Index("ix_assets_source_id_remote_path", "source_id", "remote_path"),
+        Index("ix_assets_source_status", "source_status"),
+        Index("ix_assets_source_id_remote_file_id", "source_id", "remote_file_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -134,6 +141,7 @@ class Asset(TimestampMixin, Base):
     remote_path: Mapped[str] = mapped_column(String(1200), nullable=False)
     source_path: Mapped[str | None] = mapped_column(String(1200))
     drive_file_id: Mapped[str | None] = mapped_column(String(255))
+    remote_file_id: Mapped[str | None] = mapped_column(String(255))
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
     file_ext: Mapped[str | None] = mapped_column(String(40))
     mime_type: Mapped[str | None] = mapped_column(String(180))
@@ -164,6 +172,9 @@ class Asset(TimestampMixin, Base):
     height: Mapped[int | None] = mapped_column(Integer)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    source_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    source_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_hash: Mapped[str | None] = mapped_column(String(160))
     checksum: Mapped[str | None] = mapped_column(String(160))
     quality_score: Mapped[float | None] = mapped_column(Float)
     usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -174,6 +185,14 @@ class Asset(TimestampMixin, Base):
         default="active",
         server_default=text("'active'"),
     )
+    source_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default=text("'active'"),
+    )
+    source_last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_missing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     preview_status: Mapped[str] = mapped_column(
         String(32),

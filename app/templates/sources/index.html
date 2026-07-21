@@ -14,6 +14,7 @@
           <th class="px-4 py-3">Source ID</th>
           <th class="px-4 py-3">Provider</th>
           <th class="px-4 py-3">Root</th>
+          <th class="px-4 py-3">Sync</th>
           <th class="px-4 py-3">Enabled</th>
           <th class="px-4 py-3"></th>
         </tr>
@@ -25,11 +26,24 @@
             <td class="px-4 py-3">{{ source.source_id }}</td>
             <td class="px-4 py-3">{{ source.provider }}</td>
             <td class="px-4 py-3">{{ source.root_path or "-" }}</td>
+            <td class="px-4 py-3">
+              <div>{{ source.last_sync_status or "never" }}</div>
+              <div class="text-xs text-zinc-500">{{ source.last_sync_completed_at or "" }}</div>
+              {% if source.last_sync_summary %}
+                <div class="text-xs text-zinc-500">
+                  new {{ source.last_sync_summary.get("new", 0) }},
+                  changed {{ source.last_sync_summary.get("changed", 0) }},
+                  missing {{ source.last_sync_summary.get("missing", 0) }}
+                </div>
+              {% endif %}
+            </td>
             <td class="px-4 py-3">{{ source.enabled }}</td>
-            <td class="px-4 py-3 text-right"><a class="font-medium text-zinc-700 underline decoration-zinc-300 underline-offset-2" href="/sources/{{ source.id }}/edit">Edit</a></td>
+            <td class="px-4 py-3 text-right">
+              <a class="font-medium text-zinc-700 underline decoration-zinc-300 underline-offset-2" href="/sources/{{ source.id }}">Open</a>
+            </td>
           </tr>
         {% else %}
-          <tr><td class="px-4 py-8 text-center text-zinc-500" colspan="6">No sources found.</td></tr>
+          <tr><td class="px-4 py-8 text-center text-zinc-500" colspan="7">No sources found.</td></tr>
         {% endfor %}
       </tbody>
     </table>

@@ -14,7 +14,16 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.db import get_db_session
-from app.models import Asset, AssetAllowedBrand, AssetKeyword, Brand, Niche, Product, Source
+from app.models import (
+    Asset,
+    AssetAllowedBrand,
+    AssetKeyword,
+    Brand,
+    Niche,
+    Product,
+    Source,
+    SourceSyncRun,
+)
 from app.models.asset import (
     AI_ENRICHMENT_STATUS_VALUES,
     ASSET_STATUS_VALUES,
@@ -30,6 +39,7 @@ from app.services.asset_preview import (
     safe_asset_uid,
 )
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
+from app.services.source_sync import scan_source
 
 router = APIRouter(tags=["admin"])
 templates = Jinja2Templates(directory="app/templates")
@@ -368,6 +378,41 @@ def sources_index(request: Request, _: AdminUser, session: DbSession):
     )
 
 
+@router.get("/sources/{source_id:int}")
+def sources_detail(request: Request, source_id: int, _: AdminUser, session: DbSession):
+    source = get_or_404(session, Source, source_id)
+    runs = session.scalars(
+        select(SourceSyncRun)
+        .where(SourceSyncRun.source_id == source.id)
+        .order_by(SourceSyncRun.started_at.desc(), SourceSyncRun.id.desc())
+        .limit(10)
+    ).all()
+    latest_run = runs[0] if runs else None
+    return templates.TemplateResponse(
+        request,
+        "sources/detail.html",
+        {
+            "page_title": source.label,
+            "source": source,
+            "runs": runs,
+            "latest_run": latest_run,
+            "report_limit": 200,
+        },
+    )
+
+
+@router.post("/sources/{source_id:int}/sync/scan")
+def sources_scan(source_id: int, admin_user: AdminUser, session: DbSession):
+    scan_source(session, source_id, apply=False, created_by=admin_user)
+    return redirect_to(f"/sources/{source_id}")
+
+
+@router.post("/sources/{source_id:int}/sync/apply")
+def sources_apply(source_id: int, admin_user: AdminUser, session: DbSession):
+    scan_source(session, source_id, apply=True, created_by=admin_user)
+    return redirect_to(f"/sources/{source_id}")
+
+
 @router.get("/sources/new")
 def sources_new(request: Request, _: AdminUser):
     return templates.TemplateResponse(
@@ -386,6 +431,8 @@ def sources_create(
     label: Annotated[str, Form()],
     rclone_remote: Annotated[str | None, Form()] = None,
     root_path: Annotated[str | None, Form()] = None,
+    folder_url: Annotated[str | None, Form()] = None,
+    sync_enabled: Annotated[str | None, Form()] = None,
     enabled: Annotated[str | None, Form()] = None,
 ):
     session.add(
@@ -395,6 +442,8 @@ def sources_create(
             label=label.strip(),
             rclone_remote=clean_text(rclone_remote),
             root_path=clean_text(root_path),
+            folder_url=clean_text(folder_url),
+            sync_enabled=clean_bool(sync_enabled),
             enabled=clean_bool(enabled),
         )
     )
@@ -402,17 +451,21 @@ def sources_create(
     return redirect_to("/sources")
 
 
-@router.get("/sources/{source_id}/edit")
+@router.get("/sources/{source_id:int}/edit")
 def sources_edit(request: Request, source_id: int, _: AdminUser, session: DbSession):
     source = get_or_404(session, Source, source_id)
     return templates.TemplateResponse(
         request,
         "sources/form.html",
-        {"page_title": f"Edit {source.label}", "source": source, "provider_values": PROVIDER_VALUES},
+        {
+            "page_title": f"Edit {source.label}",
+            "source": source,
+            "provider_values": PROVIDER_VALUES,
+        },
     )
 
 
-@router.post("/sources/{source_id}/edit")
+@router.post("/sources/{source_id:int}/edit")
 def sources_update(
     source_id: int,
     _: AdminUser,
@@ -422,6 +475,8 @@ def sources_update(
     label: Annotated[str, Form()],
     rclone_remote: Annotated[str | None, Form()] = None,
     root_path: Annotated[str | None, Form()] = None,
+    folder_url: Annotated[str | None, Form()] = None,
+    sync_enabled: Annotated[str | None, Form()] = None,
     enabled: Annotated[str | None, Form()] = None,
 ):
     source = get_or_404(session, Source, source_id)
@@ -430,6 +485,8 @@ def sources_update(
     source.label = label.strip()
     source.rclone_remote = clean_text(rclone_remote)
     source.root_path = clean_text(root_path)
+    source.folder_url = clean_text(folder_url)
+    source.sync_enabled = clean_bool(sync_enabled)
     source.enabled = clean_bool(enabled)
     session.commit()
     return redirect_to("/sources")

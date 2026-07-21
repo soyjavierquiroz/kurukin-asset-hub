@@ -14,7 +14,7 @@ from app.models.job_asset_bundle import JobAssetBundle, JobAssetBundleItem
 from app.models.niche import Niche
 from app.models.product import Product
 from app.models.product_asset_policy import ProductAssetPolicy
-from app.models.source import Source
+from app.models.source import Source, SourceSyncRun
 
 __all__ = [
     "Asset",
@@ -35,4 +35,5 @@ __all__ = [
     "Product",
     "ProductAssetPolicy",
     "Source",
+    "SourceSyncRun",
 ]

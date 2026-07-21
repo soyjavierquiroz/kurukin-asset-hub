@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="mb-6 flex items-start justify-between gap-4">
+    <div>
+      <a class="text-sm font-medium text-zinc-600 hover:text-zinc-950" href="/sources">Back to sources</a>
+      <h1 class="mt-3 text-2xl font-semibold tracking-normal">{{ source.label }}</h1>
+      <p class="mt-1 text-sm text-zinc-500">{{ source.source_id }}</p>
+    </div>
+    <div class="flex gap-2">
+      <a class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" href="/sources/{{ source.id }}/edit">Edit</a>
+      <form method="post" action="/sources/{{ source.id }}/sync/scan">
+        <button class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" type="submit">Scan source</button>
+      </form>
+      <form method="post" action="/sources/{{ source.id }}/sync/apply">
+        <button class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" type="submit">Apply sync</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="mb-6 grid gap-4 md:grid-cols-2">
+    <section class="rounded border border-zinc-200 bg-white p-5 text-sm">
+      <h2 class="mb-3 text-base font-semibold">Config</h2>
+      <dl class="grid grid-cols-3 gap-2">
+        <dt class="text-zinc-500">Provider</dt><dd class="col-span-2">{{ source.provider }}</dd>
+        <dt class="text-zinc-500">Remote</dt><dd class="col-span-2">{{ source.rclone_remote or "-" }}</dd>
+        <dt class="text-zinc-500">Root</dt><dd class="col-span-2">{{ source.root_path or "-" }}</dd>
+        <dt class="text-zinc-500">Folder URL</dt><dd class="col-span-2 break-all">{{ source.folder_url or "-" }}</dd>
+        <dt class="text-zinc-500">Sync</dt><dd class="col-span-2">{{ source.sync_enabled }}</dd>
+      </dl>
+    </section>
+    <section class="rounded border border-zinc-200 bg-white p-5 text-sm">
+      <h2 class="mb-3 text-base font-semibold">Last sync</h2>
+      <dl class="grid grid-cols-3 gap-2">
+        <dt class="text-zinc-500">Status</dt><dd class="col-span-2">{{ source.last_sync_status or "never" }}</dd>
+        <dt class="text-zinc-500">Started</dt><dd class="col-span-2">{{ source.last_sync_started_at or "-" }}</dd>
+        <dt class="text-zinc-500">Completed</dt><dd class="col-span-2">{{ source.last_sync_completed_at or "-" }}</dd>
+        {% if source.last_sync_error %}
+          <dt class="text-zinc-500">Error</dt><dd class="col-span-2 text-red-700">{{ source.last_sync_error }}</dd>
+        {% endif %}
+      </dl>
+    </section>
+  </div>
+
+  {% if latest_run and latest_run.report_json %}
+    <section class="mb-6">
+      <h2 class="mb-3 text-lg font-semibold">Latest report</h2>
+      {% for group in ["new", "existing", "moved", "changed", "missing", "recovered", "unsupported", "errors"] %}
+        {% set rows = latest_run.report_json.get(group, []) %}
+        <details class="mb-3 rounded border border-zinc-200 bg-white" {% if rows and group in ["new", "changed", "missing", "errors"] %}open{% endif %}>
+          <summary class="cursor-pointer px-4 py-3 text-sm font-semibold capitalize">{{ group }} ({{ rows|length }})</summary>
+          <div class="overflow-auto border-t border-zinc-200">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-zinc-100 text-zinc-500">
+                <tr>
+                  <th class="px-3 py-2">Action</th>
+                  <th class="px-3 py-2">Filename</th>
+                  <th class="px-3 py-2">Remote path</th>
+                  <th class="px-3 py-2">Previous path</th>
+                  <th class="px-3 py-2">Asset</th>
+                  <th class="px-3 py-2">Reason</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-zinc-100">
+                {% for row in rows[:report_limit] %}
+                  <tr>
+                    <td class="px-3 py-2">{{ row.action }}</td>
+                    <td class="px-3 py-2">{{ row.filename or "-" }}</td>
+                    <td class="px-3 py-2">{{ row.remote_path or "-" }}</td>
+                    <td class="px-3 py-2">{{ row.previous_remote_path or "-" }}</td>
+                    <td class="px-3 py-2">{{ row.asset_id or "-" }}</td>
+                    <td class="px-3 py-2">{{ row.reason or "-" }}</td>
+                  </tr>
+                {% else %}
+                  <tr><td class="px-3 py-5 text-center text-zinc-500" colspan="6">No rows.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      {% endfor %}
+    </section>
+  {% endif %}
+
+  <section>
+    <h2 class="mb-3 text-lg font-semibold">Recent runs</h2>
+    <div class="overflow-hidden rounded border border-zinc-200 bg-white">
+      <table class="w-full text-left text-sm">
+        <thead class="bg-zinc-100 text-xs uppercase tracking-normal text-zinc-500">
+          <tr><th class="px-4 py-3">Run</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Dry run</th><th class="px-4 py-3">Summary</th><th class="px-4 py-3">Completed</th></tr>
+        </thead>
+        <tbody class="divide-y divide-zinc-200">
+          {% for run in runs %}
+            <tr>
+              <td class="px-4 py-3 font-mono text-xs">{{ run.run_uid }}</td>
+              <td class="px-4 py-3">{{ run.status }}</td>
+              <td class="px-4 py-3">{{ run.dry_run }}</td>
+              <td class="px-4 py-3 text-xs">
+                {% if run.summary_json %}
+                  remote {{ run.summary_json.get("total_remote", 0) }},
+                  new {{ run.summary_json.get("new", 0) }},
+                  changed {{ run.summary_json.get("changed", 0) }},
+                  missing {{ run.summary_json.get("missing", 0) }},
+                  errors {{ run.summary_json.get("errors", 0) }}
+                {% endif %}
+              </td>
+              <td class="px-4 py-3">{{ run.completed_at or "-" }}</td>
+            </tr>
+          {% else %}
+            <tr><td class="px-4 py-8 text-center text-zinc-500" colspan="5">No sync runs yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

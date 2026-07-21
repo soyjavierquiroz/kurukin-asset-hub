@@ -488,3 +488,31 @@ traefik.http.services.asset-hub.loadbalancer.server.port: "8000"
 ```bash
 make test
 ```
+
+## Source Sync UI
+
+Source Sync UI permite sincronizar assets desde una `Source` existente respaldada por rclone. No es un uploader: los masters siguen viviendo en Drive/rclone y el hub sólo registra o actualiza metadata local.
+
+Flujo:
+
+1. Abrir `/sources`.
+2. Entrar a una source.
+3. Ejecutar `Scan source` para guardar un dry-run.
+4. Revisar el reporte por `new`, `existing`, `moved`, `changed`, `missing`, `unsupported` y `errors`.
+5. Ejecutar `Apply sync` para crear/actualizar assets.
+
+Reglas operativas:
+
+- El remote rclone debe existir en el servidor.
+- `missing` marca assets como faltantes, no los borra.
+- Un re-scan es incremental.
+- `moved` actualiza `remote_path`.
+- `changed` manda preview, metadata técnica e IA a `pending`.
+- Sync no borra previews, IA ni keywords manuales.
+
+CLI:
+
+```bash
+python scripts/sync_rclone_source.py --source-id drive_grandiosa_mujer_veyra --dry-run
+python scripts/sync_rclone_source.py --source-id drive_grandiosa_mujer_veyra --apply
+```

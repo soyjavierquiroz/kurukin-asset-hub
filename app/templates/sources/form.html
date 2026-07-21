@@ -27,6 +27,13 @@
       <label class="text-sm font-medium text-zinc-700">Root path
         <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="root_path" value="{{ source.root_path if source else '' }}">
       </label>
+      <label class="text-sm font-medium text-zinc-700">Folder URL
+        <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="folder_url" value="{{ source.folder_url if source else '' }}">
+      </label>
+      <label class="flex items-center gap-2 text-sm font-medium text-zinc-700">
+        <input class="rounded border-zinc-300" type="checkbox" name="sync_enabled" {% if source is none or source.sync_enabled %}checked{% endif %}>
+        Sync enabled
+      </label>
       <label class="flex items-center gap-2 text-sm font-medium text-zinc-700">
         <input class="rounded border-zinc-300" type="checkbox" name="enabled" {% if source is none or source.enabled %}checked{% endif %}>
         Enabled

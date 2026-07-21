@@ -208,6 +208,10 @@ def api_enrich_asset_with_ai(
 def eligible_base_filter():
     return and_(
         Asset.status == "active",
+        or_(
+            Asset.source_status.is_(None),
+            Asset.source_status.not_in(("missing", "inaccessible", "deleted")),
+        ),
         Asset.usage_scope != "restricted",
         Asset.auto_select_enabled.is_(True),
         Asset.rights_status != "restricted",
