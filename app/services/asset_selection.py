@@ -12,6 +12,7 @@ from app.schemas.asset_selection import (
     SelectedAsset,
 )
 from app.services.asset_policy import is_asset_eligible_for_search, resolve_asset_search_policy
+from app.services.asset_preview import preview_public_url
 from app.services.asset_search import (
     build_asset_search_blob,
     normalize_search_text,
@@ -361,14 +362,7 @@ def serialize_selected_asset(candidate: ScoredSelectionCandidate) -> SelectedAss
 
 
 def media_preview_url(path: str | None) -> str | None:
-    if not path:
-        return None
-    normalized = path.lstrip("/")
-    if normalized.startswith("media/previews/"):
-        return f"/{normalized}"
-    if normalized.startswith("previews/"):
-        return f"/media/{normalized}"
-    return f"/media/previews/{normalized}"
+    return preview_public_url(path)
 
 
 def empty_selection_response(

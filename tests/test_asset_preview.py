@@ -10,9 +10,12 @@ from app.models import Asset, Source
 from app.services import asset_preview
 from app.services.asset_preview import (
     generate_asset_preview,
+    generate_video_thumbnail,
     infer_orientation,
     parse_ffprobe_metadata,
     relative_preview_path,
+    relative_thumbnail_path_for_asset,
+    thumbnail_timestamp,
 )
 from app.services.rclone_service import RcloneError, RcloneService
 
@@ -87,6 +90,43 @@ def test_relative_preview_path_uses_safe_asset_uid() -> None:
     )
 
 
+def test_relative_thumbnail_path_for_asset_uses_public_asset_path() -> None:
+    assert relative_thumbnail_path_for_asset(123) == "assets/previews/123/thumbnail.jpg"
+
+
+def test_thumbnail_timestamp_avoids_first_frame() -> None:
+    assert thumbnail_timestamp(10) == pytest.approx(3.5)
+    assert thumbnail_timestamp(2) == pytest.approx(1.0)
+    assert thumbnail_timestamp(0) == pytest.approx(0.5)
+
+
+def test_generate_video_thumbnail_uses_jpg_temp_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "nested" / "thumbnail.jpg"
+    stale_temp = output_path.with_name(".thumbnail.tmp.jpg")
+    output_path.parent.mkdir(parents=True)
+    stale_temp.write_bytes(b"stale")
+    ffmpeg_output_paths: list[Path] = []
+
+    def fake_run_ffmpeg(command: list[str], operation: str, timeout: int = 300) -> None:
+        assert operation == "video thumbnail"
+        ffmpeg_output = Path(command[-1])
+        ffmpeg_output_paths.append(ffmpeg_output)
+        assert ffmpeg_output.name == ".thumbnail.tmp.jpg"
+        assert ffmpeg_output.suffix == ".jpg"
+        ffmpeg_output.write_bytes(b"\xff\xd8jpeg\xff\xd9")
+
+    monkeypatch.setattr(asset_preview, "run_ffmpeg", fake_run_ffmpeg)
+
+    generate_video_thumbnail(tmp_path / "input.mp4", output_path, duration_seconds=10)
+
+    assert ffmpeg_output_paths == [stale_temp]
+    assert output_path.read_bytes() == b"\xff\xd8jpeg\xff\xd9"
+    assert not stale_temp.exists()
+
+
 def test_generate_asset_preview_success(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -102,7 +142,11 @@ def test_generate_asset_preview_success(
         assert remote_path == "assets/video.mp4"
         Path(local_path).write_bytes(b"video")
 
-    def fake_thumbnail(input_path: Path, output_path: Path) -> None:
+    def fake_thumbnail(
+        input_path: Path,
+        output_path: Path,
+        duration_seconds: float | None = None,
+    ) -> None:
         output_path.write_bytes(b"thumbnail")
 
     def fake_preview(input_path: Path, output_path: Path) -> None:
@@ -140,8 +184,8 @@ def test_generate_asset_preview_success(
     assert result.codec == "h264"
     assert result.has_audio is True
     assert result.orientation == "9:16"
-    assert result.thumbnail_path == "previews/asset_test_001/thumbnail.jpg"
-    assert result.preview_path == "previews/asset_test_001/preview.mp4"
+    assert result.thumbnail_path == f"assets/previews/{asset.id}/thumbnail.jpg"
+    assert result.preview_path == f"assets/previews/{asset.id}/preview.mp4"
 
 
 def test_generate_asset_preview_rclone_failure(

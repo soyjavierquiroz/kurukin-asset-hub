@@ -53,8 +53,8 @@ def seed_preview_asset(session_factory: sessionmaker[Session]) -> int:
             type="video",
             preview_status="ready",
             technical_metadata_status="ready",
-            thumbnail_path="previews/asset_ui_001/thumbnail.jpg",
-            preview_path="previews/asset_ui_001/preview.mp4",
+            thumbnail_path="assets/previews/1/thumbnail.jpg",
+            preview_path="assets/previews/1/preview.mp4",
         )
         session.add(asset)
         session.commit()
@@ -70,7 +70,7 @@ def test_asset_detail_shows_generate_preview_button_and_video() -> None:
 
     assert response.status_code == 200
     assert "Regenerate Preview" in response.text
-    assert "/media/previews/asset_ui_001/preview.mp4" in response.text
+    assert "/media/assets/previews/1/preview.mp4" in response.text
     assert "<video" in response.text
 
 

@@ -20,6 +20,7 @@ TEMP_ROOT = Path("/tmp/kurukin-asset-hub-probe")
 SAFE_PATH_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 PREVIEW_FILENAMES = frozenset({"thumbnail.jpg", "preview.mp4", "preview.jpg"})
 VIDEO_PREVIEW_MAX_SECONDS = 30
+PUBLIC_PREVIEW_PREFIX = "assets/previews"
 
 
 class AssetPreviewError(RuntimeError):
@@ -81,18 +82,18 @@ def generate_asset_preview(session: Session, asset_id: int, force: bool = False)
         technical_ready = True
         session.commit()
 
-        output_dir = preview_output_dir(asset.asset_uid)
+        output_dir = preview_output_dir_for_asset_id(asset.id)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         thumbnail_path: str | None = None
         preview_path: str | None = None
         if asset.type == "video":
-            thumbnail_file = output_dir / "thumbnail.jpg"
+            thumbnail_file = preview_file_path_for_asset(asset.id, "thumbnail.jpg")
             preview_file = output_dir / "preview.mp4"
-            generate_video_thumbnail(download_path, thumbnail_file)
+            generate_video_thumbnail(download_path, thumbnail_file, metadata.duration_seconds)
             generate_video_preview(download_path, preview_file)
-            thumbnail_path = relative_preview_path(asset.asset_uid, "thumbnail.jpg")
-            preview_path = relative_preview_path(asset.asset_uid, "preview.mp4")
+            thumbnail_path = relative_thumbnail_path_for_asset(asset.id)
+            preview_path = relative_preview_path_for_asset(asset.id, "preview.mp4")
         elif asset.type == "image":
             thumbnail_file = output_dir / "thumbnail.jpg"
             preview_file = output_dir / "preview.jpg"
@@ -229,19 +230,38 @@ def infer_orientation(width: int | None, height: int | None) -> str:
     return "unknown"
 
 
-def generate_video_thumbnail(input_path: Path, output_path: Path) -> None:
+def generate_video_thumbnail(
+    input_path: Path,
+    output_path: Path,
+    duration_seconds: float | None = None,
+) -> None:
+    timestamp = thumbnail_timestamp(duration_seconds)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_output = output_path.with_name(f".{output_path.stem}.tmp{output_path.suffix}")
+    temp_output.unlink(missing_ok=True)
     command = [
         "ffmpeg",
         "-y",
+        "-ss",
+        f"{timestamp:.3f}",
         "-i",
         str(input_path),
-        "-vf",
-        "thumbnail,scale=w='if(gte(iw,ih),min(720,iw),-2)':h='if(gte(iw,ih),-2,min(720,ih))'",
         "-frames:v",
         "1",
-        str(output_path),
+        "-vf",
+        "scale=480:-2",
+        "-q:v",
+        "3",
+        str(temp_output),
     ]
-    run_ffmpeg(command, "video thumbnail")
+    try:
+        run_ffmpeg(command, "video thumbnail")
+        validate_preview_file(temp_output)
+        validate_jpeg_file(temp_output)
+        temp_output.replace(output_path)
+    except Exception:
+        temp_output.unlink(missing_ok=True)
+        raise
 
 
 def generate_video_preview(input_path: Path, output_path: Path) -> None:
@@ -323,10 +343,86 @@ def preview_output_dir(asset_uid: str) -> Path:
     return Path(get_settings().preview_storage_dir) / safe_asset_uid(asset_uid)
 
 
+def preview_output_dir_for_asset_id(asset_id: int) -> Path:
+    return Path(get_settings().preview_storage_dir) / PUBLIC_PREVIEW_PREFIX / str(asset_id)
+
+
+def preview_file_path_for_asset(asset_id: int, filename: str) -> Path:
+    if filename not in PREVIEW_FILENAMES:
+        raise AssetPreviewError("Unsupported preview filename")
+    return preview_output_dir_for_asset_id(asset_id) / filename
+
+
 def relative_preview_path(asset_uid: str, filename: str) -> str:
     if filename not in PREVIEW_FILENAMES:
         raise AssetPreviewError("Unsupported preview filename")
     return f"previews/{safe_asset_uid(asset_uid)}/{filename}"
+
+
+def relative_preview_path_for_asset(asset_id: int, filename: str) -> str:
+    if filename not in PREVIEW_FILENAMES:
+        raise AssetPreviewError("Unsupported preview filename")
+    if asset_id <= 0:
+        raise AssetPreviewError("Asset ID is required for preview storage")
+    return f"{PUBLIC_PREVIEW_PREFIX}/{asset_id}/{filename}"
+
+
+def relative_thumbnail_path_for_asset(asset_id: int) -> str:
+    return relative_preview_path_for_asset(asset_id, "thumbnail.jpg")
+
+
+def local_preview_file(path: str | None) -> Path | None:
+    if not path:
+        return None
+    normalized = path.strip().lstrip("/")
+    if normalized.startswith("media/"):
+        normalized = normalized.removeprefix("media/")
+    if normalized.startswith("previews/"):
+        parts = [part for part in normalized.removeprefix("previews/").split("/") if part]
+        if len(parts) != 2 or parts[1] not in PREVIEW_FILENAMES:
+            return None
+        return Path(get_settings().preview_storage_dir).joinpath(*parts)
+    if normalized.startswith(f"{PUBLIC_PREVIEW_PREFIX}/"):
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) != 4 or parts[-1] not in PREVIEW_FILENAMES:
+            return None
+        return Path(get_settings().preview_storage_dir).joinpath(*parts)
+    return None
+
+
+def preview_public_url(path: str | None) -> str | None:
+    if not path:
+        return None
+    normalized = path.strip().lstrip("/")
+    if not local_preview_file(normalized):
+        return None
+    return f"/media/{normalized}"
+
+
+def thumbnail_timestamp(duration_seconds: float | None) -> float:
+    if duration_seconds is None or duration_seconds <= 0:
+        return 0.5
+    if duration_seconds < 3:
+        return max(0.1, duration_seconds / 2)
+    return min(max(0.5, duration_seconds * 0.35), max(0.1, duration_seconds - 0.1))
+
+
+def validate_preview_file(path: Path) -> None:
+    if not path.is_file():
+        raise AssetPreviewError("Preview file was not created")
+    if path.stat().st_size <= 0:
+        raise AssetPreviewError("Preview file is empty")
+
+
+def validate_jpeg_file(path: Path) -> None:
+    with path.open("rb") as file:
+        header = file.read(2)
+        if file.seek(0, 2) < 4:
+            raise AssetPreviewError("Thumbnail is not a valid JPEG")
+        file.seek(-2, 2)
+        footer = file.read(2)
+    if header != b"\xff\xd8" or footer != b"\xff\xd9":
+        raise AssetPreviewError("Thumbnail is not a valid JPEG")
 
 
 def safe_asset_uid(asset_uid: str) -> str:

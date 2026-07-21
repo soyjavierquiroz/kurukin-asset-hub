@@ -87,12 +87,14 @@
     <section class="rounded border border-zinc-200 bg-white p-5 lg:col-span-2">
       <h2 class="text-lg font-semibold tracking-normal">Preview</h2>
       <div class="mt-4">
-        {% if asset.preview_path and asset.type == "video" %}
-          <video class="max-h-[70vh] w-full rounded bg-black" src="/media/{{ asset.preview_path }}" controls preload="metadata"></video>
-        {% elif asset.preview_path and asset.type == "image" %}
-          <img class="max-h-[70vh] w-full rounded object-contain bg-zinc-100" src="/media/{{ asset.preview_path }}" alt="">
-        {% elif asset.thumbnail_path %}
-          <img class="max-h-96 rounded object-contain bg-zinc-100" src="/media/{{ asset.thumbnail_path }}" alt="">
+        {% set preview_url = preview_public_url(asset.preview_path) %}
+        {% set thumbnail_url = preview_public_url(asset.thumbnail_path) %}
+        {% if preview_url and asset.type == "video" %}
+          <video class="max-h-[70vh] w-full rounded bg-black" src="{{ preview_url }}" controls preload="metadata"></video>
+        {% elif preview_url and asset.type == "image" %}
+          <img class="max-h-[70vh] w-full rounded object-contain bg-zinc-100" src="{{ preview_url }}" alt="" loading="lazy">
+        {% elif thumbnail_url %}
+          <img class="max-h-96 rounded object-contain bg-zinc-100" src="{{ thumbnail_url }}" alt="" loading="lazy">
         {% else %}
           <div class="flex h-48 items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-sm text-zinc-400">No preview</div>
         {% endif %}
@@ -128,8 +130,9 @@
               <tr>
                 <td class="px-3 py-2"><a class="font-medium underline decoration-zinc-300 underline-offset-2" href="/assets/{{ child.id }}">{{ child.id }}</a></td>
                 <td class="px-3 py-2">
-                  {% if child.thumbnail_path %}
-                    <img class="h-14 w-14 rounded object-cover" src="/media/{{ child.thumbnail_path }}" alt="">
+                  {% set child_thumbnail_url = preview_public_url(child.thumbnail_path) %}
+                  {% if child_thumbnail_url %}
+                    <img class="h-14 w-14 rounded object-cover" src="{{ child_thumbnail_url }}" alt="" loading="lazy">
                   {% else %}
                     <div class="flex h-14 w-14 items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-xs text-zinc-400">-</div>
                   {% endif %}
@@ -183,10 +186,10 @@
           </dl>
         </div>
         <div class="w-full md:w-48">
-          {% if asset.thumbnail_path %}
-            <img class="h-32 w-full rounded bg-zinc-100 object-cover" src="/media/{{ asset.thumbnail_path }}" alt="">
-          {% elif asset.preview_path and asset.type == "image" %}
-            <img class="h-32 w-full rounded bg-zinc-100 object-cover" src="/media/{{ asset.preview_path }}" alt="">
+          {% if thumbnail_url %}
+            <img class="h-32 w-full rounded bg-zinc-100 object-cover" src="{{ thumbnail_url }}" alt="" loading="lazy">
+          {% elif preview_url and asset.type == "image" %}
+            <img class="h-32 w-full rounded bg-zinc-100 object-cover" src="{{ preview_url }}" alt="" loading="lazy">
           {% else %}
             <div class="flex h-32 w-full items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-sm text-zinc-400">No visual</div>
           {% endif %}

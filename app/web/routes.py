@@ -35,6 +35,8 @@ from app.models.common import PROVIDER_VALUES
 from app.services.asset_preview import (
     PREVIEW_FILENAMES,
     generate_asset_preview,
+    local_preview_file,
+    preview_public_url,
     preview_output_dir,
     safe_asset_uid,
 )
@@ -251,6 +253,7 @@ def assets_index(
             "total": total,
             "needs_review_count": needs_review_count,
             "long_video_threshold_seconds": get_settings().long_video_threshold_seconds,
+            "preview_public_url": preview_public_url,
         },
     )
 
@@ -297,6 +300,7 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
             "derived_clips": derived_clips,
             "long_video_threshold_seconds": settings.long_video_threshold_seconds,
             "ai_keywords_by_category": dict(ai_keywords_by_category),
+            "preview_public_url": preview_public_url,
         },
     )
 
@@ -385,6 +389,13 @@ def serve_preview_file(asset_uid: str, filename: str) -> FileResponse:
     return FileResponse(path)
 
 
+def serve_media_path(path: str) -> FileResponse:
+    file_path = local_preview_file(path)
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
+    return FileResponse(file_path)
+
+
 @router.get("/media/previews/{asset_uid}/thumbnail.jpg")
 def media_preview_thumbnail(asset_uid: str, _: AdminUser):
     return serve_preview_file(asset_uid, "thumbnail.jpg")
@@ -398,6 +409,13 @@ def media_preview_video(asset_uid: str, _: AdminUser):
 @router.get("/media/previews/{asset_uid}/preview.jpg")
 def media_preview_image(asset_uid: str, _: AdminUser):
     return serve_preview_file(asset_uid, "preview.jpg")
+
+
+@router.get("/media/assets/previews/{asset_id}/{filename}")
+def media_asset_preview(asset_id: int, filename: str, _: AdminUser):
+    if filename not in PREVIEW_FILENAMES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
+    return serve_media_path(f"assets/previews/{asset_id}/{filename}")
 
 
 @router.get("/sources")

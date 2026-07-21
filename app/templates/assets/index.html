@@ -168,8 +168,12 @@
               <input class="h-4 w-4 rounded border-zinc-300" type="checkbox" name="asset_ids" value="{{ asset.id }}">
             </td>
             <td class="px-4 py-3">
-              {% if asset.thumbnail_path %}
-                <img class="h-16 w-16 rounded object-cover" src="/media/{{ asset.thumbnail_path }}" alt="">
+              {% set thumbnail_url = preview_public_url(asset.thumbnail_path) %}
+              {% set preview_url = preview_public_url(asset.preview_path) %}
+              {% if thumbnail_url %}
+                <a href="{{ preview_url or thumbnail_url }}">
+                  <img class="h-16 w-16 rounded object-cover" src="{{ thumbnail_url }}" alt="" loading="lazy">
+                </a>
               {% else %}
                 <div class="flex h-16 w-16 items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-xs text-zinc-400">No preview</div>
               {% endif %}
@@ -209,7 +213,15 @@
             <td class="px-4 py-3">{{ asset.product.name if asset.product else "-" }}</td>
             <td class="px-4 py-3">{{ asset.orientation }}</td>
             <td class="px-4 py-3">{{ "%.2f"|format(asset.duration_seconds) if asset.duration_seconds else "-" }}</td>
-            <td class="px-4 py-3">{{ asset.preview_status }}</td>
+            <td class="px-4 py-3">
+              {% if thumbnail_url and asset.preview_status == "ready" %}
+                <span class="inline-flex rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">Preview ready</span>
+              {% elif asset.preview_status == "failed" %}
+                <span class="inline-flex rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">Preview failed</span>
+              {% else %}
+                <span class="inline-flex rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">Preview pending</span>
+              {% endif %}
+            </td>
             <td class="px-4 py-3">
               <div>{{ ai_status_badge(asset) }}</div>
               {% if asset.ai_enrichment_confidence is not none %}
@@ -238,7 +250,14 @@
               </div>
             </td>
             <td class="px-4 py-3">{{ asset.status }}</td>
-            <td class="px-4 py-3">{{ asset.source.label if asset.source else "-" }}</td>
+            <td class="px-4 py-3">
+              <div>{{ asset.source_path or (asset.source.label if asset.source else "-") }}</div>
+              {% if asset.segment_start_seconds is not none and asset.segment_end_seconds is not none %}
+                <div class="mt-1 text-xs text-zinc-500">Cut: {{ "%.3f"|format(asset.segment_start_seconds) }} -> {{ "%.3f"|format(asset.segment_end_seconds) }}</div>
+              {% elif asset.is_derivative %}
+                <div class="mt-1 text-xs text-zinc-400">Cut metadata unavailable</div>
+              {% endif %}
+            </td>
           </tr>
         {% else %}
           <tr>
