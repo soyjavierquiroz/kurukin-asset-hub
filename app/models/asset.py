@@ -66,6 +66,8 @@ USAGE_SCOPE_VALUES = (
     "restricted",
 )
 RIGHTS_STATUS_VALUES = ("owned", "licensed", "stock", "unknown", "restricted")
+SEGMENTATION_STATUS_VALUES = ("pending", "processing", "ready", "failed", "partial", "skipped")
+ORIGINAL_DELETE_STATUS_VALUES = ("pending", "deleted", "failed", "skipped")
 
 
 class Asset(TimestampMixin, Base):
@@ -119,6 +121,14 @@ class Asset(TimestampMixin, Base):
             f"rights_status in {RIGHTS_STATUS_VALUES}",
             name="ck_assets_rights_status",
         ),
+        CheckConstraint(
+            f"segmentation_status in {SEGMENTATION_STATUS_VALUES}",
+            name="ck_assets_segmentation_status",
+        ),
+        CheckConstraint(
+            f"original_delete_status in {ORIGINAL_DELETE_STATUS_VALUES}",
+            name="ck_assets_original_delete_status",
+        ),
         Index("ix_assets_type", "type"),
         Index("ix_assets_status", "status"),
         Index("ix_assets_brand_id", "brand_id"),
@@ -131,6 +141,9 @@ class Asset(TimestampMixin, Base):
         Index("ix_assets_source_id_remote_path", "source_id", "remote_path"),
         Index("ix_assets_source_status", "source_status"),
         Index("ix_assets_source_id_remote_file_id", "source_id", "remote_file_id"),
+        Index("ix_assets_parent_asset_id", "parent_asset_id"),
+        Index("ix_assets_is_derivative", "is_derivative"),
+        Index("ix_assets_segmentation_status", "segmentation_status"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -258,6 +271,31 @@ class Asset(TimestampMixin, Base):
         default=True,
         server_default=true(),
     )
+    parent_asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id"))
+    is_derivative: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    derivative_type: Mapped[str | None] = mapped_column(String(80))
+    segment_index: Mapped[int | None] = mapped_column(Integer)
+    segment_start_seconds: Mapped[float | None] = mapped_column(Float)
+    segment_end_seconds: Mapped[float | None] = mapped_column(Float)
+    segmentation_status: Mapped[str | None] = mapped_column(String(32))
+    segmented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    segment_count: Mapped[int | None] = mapped_column(Integer)
+    delete_original_eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    original_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    original_delete_status: Mapped[str | None] = mapped_column(String(32))
+    original_delete_error: Mapped[str | None] = mapped_column(Text)
+    segmentation_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    segmentation_approved_by: Mapped[str | None] = mapped_column(String(160))
 
     flip_horizontal_allowed: Mapped[bool] = mapped_column(
         Boolean,
@@ -377,6 +415,15 @@ class Asset(TimestampMixin, Base):
     reuse_cooldown_days: Mapped[int | None] = mapped_column(Integer)
 
     source: Mapped["Source"] = relationship(back_populates="assets")
+    parent_asset: Mapped["Asset | None"] = relationship(
+        "Asset",
+        remote_side=[id],
+        back_populates="derived_assets",
+    )
+    derived_assets: Mapped[list["Asset"]] = relationship(
+        "Asset",
+        back_populates="parent_asset",
+    )
     brand: Mapped["Brand | None"] = relationship(back_populates="assets")
     product: Mapped["Product | None"] = relationship(back_populates="assets")
     tags: Mapped[list["AssetTag"]] = relationship(

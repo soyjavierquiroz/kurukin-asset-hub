@@ -39,6 +39,11 @@ from app.services.asset_preview import (
     safe_asset_uid,
 )
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
+from app.services.long_video_segmentation import (
+    approve_segmentation,
+    delete_original_after_approval,
+    segment_long_video_asset,
+)
 from app.services.source_sync import scan_source
 
 router = APIRouter(tags=["admin"])
@@ -245,6 +250,7 @@ def assets_index(
             "pages": pages,
             "total": total,
             "needs_review_count": needs_review_count,
+            "long_video_threshold_seconds": get_settings().long_video_threshold_seconds,
         },
     )
 
@@ -270,6 +276,12 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
     )
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    settings = get_settings()
+    derived_clips = session.scalars(
+        select(Asset)
+        .where(Asset.parent_asset_id == asset.id)
+        .order_by(Asset.segment_index.asc(), Asset.id.asc())
+    ).all()
     ai_keywords_by_category: dict[str, list[AssetKeyword]] = defaultdict(list)
     for keyword in sorted(
         (keyword for keyword in asset.keywords if keyword.source == "ai"),
@@ -282,9 +294,29 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
         {
             "page_title": asset.filename,
             "asset": asset,
+            "derived_clips": derived_clips,
+            "long_video_threshold_seconds": settings.long_video_threshold_seconds,
             "ai_keywords_by_category": dict(ai_keywords_by_category),
         },
     )
+
+
+@router.post("/assets/{asset_id}/segment")
+def assets_segment_video(asset_id: int, admin_user: AdminUser, session: DbSession):
+    segment_long_video_asset(session, asset_id, force=False, created_by=admin_user)
+    return redirect_to(f"/assets/{asset_id}")
+
+
+@router.post("/assets/{asset_id}/approve-segmentation")
+def assets_approve_segmentation(asset_id: int, admin_user: AdminUser, session: DbSession):
+    approve_segmentation(session, asset_id, approved_by=admin_user)
+    return redirect_to(f"/assets/{asset_id}")
+
+
+@router.post("/assets/{asset_id}/delete-original")
+def assets_delete_original(asset_id: int, _: AdminUser, session: DbSession):
+    delete_original_after_approval(session, asset_id, force=False)
+    return redirect_to(f"/assets/{asset_id}")
 
 
 @router.post("/assets/{asset_id}/generate-preview")
@@ -432,6 +464,10 @@ def sources_create(
     rclone_remote: Annotated[str | None, Form()] = None,
     root_path: Annotated[str | None, Form()] = None,
     folder_url: Annotated[str | None, Form()] = None,
+    source_role: Annotated[str | None, Form()] = None,
+    derived_rclone_remote: Annotated[str | None, Form()] = None,
+    derived_root_path: Annotated[str | None, Form()] = None,
+    derived_source_id: Annotated[str | None, Form()] = None,
     sync_enabled: Annotated[str | None, Form()] = None,
     enabled: Annotated[str | None, Form()] = None,
 ):
@@ -443,6 +479,10 @@ def sources_create(
             rclone_remote=clean_text(rclone_remote),
             root_path=clean_text(root_path),
             folder_url=clean_text(folder_url),
+            source_role=clean_text(source_role),
+            derived_rclone_remote=clean_text(derived_rclone_remote),
+            derived_root_path=clean_text(derived_root_path),
+            derived_source_id=clean_text(derived_source_id),
             sync_enabled=clean_bool(sync_enabled),
             enabled=clean_bool(enabled),
         )
@@ -476,6 +516,10 @@ def sources_update(
     rclone_remote: Annotated[str | None, Form()] = None,
     root_path: Annotated[str | None, Form()] = None,
     folder_url: Annotated[str | None, Form()] = None,
+    source_role: Annotated[str | None, Form()] = None,
+    derived_rclone_remote: Annotated[str | None, Form()] = None,
+    derived_root_path: Annotated[str | None, Form()] = None,
+    derived_source_id: Annotated[str | None, Form()] = None,
     sync_enabled: Annotated[str | None, Form()] = None,
     enabled: Annotated[str | None, Form()] = None,
 ):
@@ -486,6 +530,10 @@ def sources_update(
     source.rclone_remote = clean_text(rclone_remote)
     source.root_path = clean_text(root_path)
     source.folder_url = clean_text(folder_url)
+    source.source_role = clean_text(source_role)
+    source.derived_rclone_remote = clean_text(derived_rclone_remote)
+    source.derived_root_path = clean_text(derived_root_path)
+    source.derived_source_id = clean_text(derived_source_id)
     source.sync_enabled = clean_bool(sync_enabled)
     source.enabled = clean_bool(enabled)
     session.commit()

@@ -516,3 +516,56 @@ CLI:
 python scripts/sync_rclone_source.py --source-id drive_grandiosa_mujer_veyra --dry-run
 python scripts/sync_rclone_source.py --source-id drive_grandiosa_mujer_veyra --apply
 ```
+
+## Long Video Segmentation
+
+Long videos are raw material. Asset Hub can segment a long video asset into short derived b-roll clips, upload those clips to Drive/rclone, catalog them as real child assets, and keep the original record for audit.
+
+Default Drive shape:
+
+```text
+Assets/stock/raw-long/inbox/
+Assets/stock/derived-brolls/
+  women/
+  men/
+  couples/
+  animals/
+  family/
+  business/
+  nature/
+  food/
+  health/
+  abstract/
+  spiritual/
+  other/
+```
+
+Operational rules:
+
+- Originals are never deleted automatically.
+- Derived clips are uploaded with high quality H.264 encode, CRF/preset from config, same resolution by default, no audio, and `+faststart`.
+- Derived clips are b-rolls and are exported without audio by default with `SEGMENT_STRIP_AUDIO=true`.
+- Temporary local files are removed after the run.
+- Categories are intentionally broad; fine metadata lives in the catalog.
+- Original deletion requires approval and at least one active child asset. If Drive sends files to trash, freeing real space may require emptying trash.
+
+Source setup:
+
+- RAW source: `source_role=raw_long`, with its own `rclone_remote` and `root_path`.
+- Derived target can be configured on the RAW source with `derived_rclone_remote`, `derived_root_path`, and optional `derived_source_id`.
+- CLI flags `--derived-remote` and `--derived-root` override missing source config.
+
+CLI examples:
+
+```bash
+python scripts/segment_long_videos.py --asset-id 123 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+python scripts/segment_long_videos.py --source-id drive_stock_raw_long --limit 5 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+```
+
+Review in UI:
+
+- Open the parent asset detail.
+- Use `Segment video` for a long video.
+- Check `Long Video Segmentation` and `Derived clips`.
+- Use `Approve segmentation` after reviewing children.
+- Use `Delete original` only after approval when eligible.

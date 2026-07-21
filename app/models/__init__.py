@@ -4,6 +4,7 @@ from app.models.asset_allowed_brand import AssetAllowedBrand
 from app.models.asset_collection import AssetCollection
 from app.models.asset_keyword import AssetKeyword
 from app.models.asset_niche import AssetNiche
+from app.models.asset_segmentation import AssetSegment, AssetSegmentationRun
 from app.models.asset_tag import AssetTag
 from app.models.asset_usage import AssetUsage
 from app.models.auth_profile import AuthProfile
@@ -23,6 +24,8 @@ __all__ = [
     "AssetCollection",
     "AssetKeyword",
     "AssetNiche",
+    "AssetSegment",
+    "AssetSegmentationRun",
     "AssetTag",
     "AssetUsage",
     "AuthProfile",

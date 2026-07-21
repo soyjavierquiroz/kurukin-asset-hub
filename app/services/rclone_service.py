@@ -30,6 +30,50 @@ class RcloneService:
         ]
         self._run(command, operation="copyto", timeout=timeout)
 
+    def copyto_local_to_remote(
+        self,
+        local_path: str,
+        remote_name: str,
+        remote_path: str,
+        timeout: int = 900,
+    ) -> None:
+        target = self._target(remote_name, remote_path)
+        command = [
+            self.binary,
+            "copyto",
+            local_path,
+            target,
+        ]
+        self._run(command, operation="copyto upload", timeout=timeout)
+
+    def delete_remote_file(
+        self,
+        remote_name: str,
+        remote_path: str,
+        timeout: int = 300,
+    ) -> None:
+        target = self._target(remote_name, remote_path)
+        command = [
+            self.binary,
+            "deletefile",
+            target,
+        ]
+        self._run(command, operation="deletefile", timeout=timeout)
+
+    def mkdir_remote(
+        self,
+        remote_name: str,
+        remote_path: str,
+        timeout: int = 300,
+    ) -> None:
+        target = self._target(remote_name, remote_path)
+        command = [
+            self.binary,
+            "mkdir",
+            target,
+        ]
+        self._run(command, operation="mkdir", timeout=timeout)
+
     def list_json(self, remote: str, root: str) -> list[dict[str, Any]]:
         target = self._target(remote, root)
         command = [

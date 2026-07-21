@@ -36,6 +36,26 @@ class Settings(BaseSettings):
     ai_frame_sample_count: int = Field(default=8, ge=1, le=30, alias="AI_FRAME_SAMPLE_COUNT")
     ai_review_threshold: float = Field(default=0.72, ge=0.0, le=1.0, alias="AI_REVIEW_THRESHOLD")
     ai_max_assets_per_batch: int = Field(default=20, ge=1, le=200, alias="AI_MAX_ASSETS_PER_BATCH")
+    long_video_segmentation_enabled: bool = Field(
+        default=True,
+        alias="LONG_VIDEO_SEGMENTATION_ENABLED",
+    )
+    long_video_threshold_seconds: float = Field(default=30.0, alias="LONG_VIDEO_THRESHOLD_SECONDS")
+    segment_min_seconds: float = Field(default=4.0, alias="SEGMENT_MIN_SECONDS")
+    segment_target_seconds: float = Field(default=8.0, alias="SEGMENT_TARGET_SECONDS")
+    segment_max_seconds: float = Field(default=15.0, alias="SEGMENT_MAX_SECONDS")
+    segment_scene_threshold: float = Field(default=0.32, alias="SEGMENT_SCENE_THRESHOLD")
+    segment_output_mode: str = Field(
+        default="high_quality_encode",
+        alias="SEGMENT_OUTPUT_MODE",
+    )
+    segment_output_crf: int = Field(default=17, alias="SEGMENT_OUTPUT_CRF")
+    segment_output_preset: str = Field(default="medium", alias="SEGMENT_OUTPUT_PRESET")
+    segment_strip_audio: bool = Field(default=True, alias="SEGMENT_STRIP_AUDIO")
+    derived_asset_category_folders: str = Field(
+        default="women,men,couples,animals,family,business,nature,food,health,abstract,spiritual,other",
+        alias="DERIVED_ASSET_CATEGORY_FOLDERS",
+    )
     app_env: str = Field(default="production", alias="APP_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

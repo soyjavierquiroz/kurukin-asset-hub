@@ -44,6 +44,10 @@ class Source(TimestampMixin, Base):
     root_path: Mapped[str | None] = mapped_column(String(1000))
     folder_url: Mapped[str | None] = mapped_column(String(1200))
     provider_folder_id: Mapped[str | None] = mapped_column(String(255))
+    source_role: Mapped[str | None] = mapped_column(String(40))
+    derived_rclone_remote: Mapped[str | None] = mapped_column(String(255))
+    derived_root_path: Mapped[str | None] = mapped_column(String(1000))
+    derived_source_id: Mapped[str | None] = mapped_column(String(120))
     sync_enabled: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

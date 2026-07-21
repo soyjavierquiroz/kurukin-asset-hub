@@ -30,6 +30,22 @@
       <label class="text-sm font-medium text-zinc-700">Folder URL
         <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="folder_url" value="{{ source.folder_url if source else '' }}">
       </label>
+      <label class="text-sm font-medium text-zinc-700">Source role
+        <select class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="source_role">
+          {% for value in ["", "standard", "raw_long", "derived_broll"] %}
+            <option value="{{ value }}" {% if source and (source.source_role or '') == value %}selected{% endif %}>{{ value or "standard" }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="text-sm font-medium text-zinc-700">Derived rclone remote
+        <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="derived_rclone_remote" value="{{ source.derived_rclone_remote if source else '' }}">
+      </label>
+      <label class="text-sm font-medium text-zinc-700">Derived root path
+        <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="derived_root_path" value="{{ source.derived_root_path if source else '' }}">
+      </label>
+      <label class="text-sm font-medium text-zinc-700">Derived source ID
+        <input class="mt-1 w-full rounded border border-zinc-300 px-3 py-2 text-sm" name="derived_source_id" value="{{ source.derived_source_id if source else '' }}">
+      </label>
       <label class="flex items-center gap-2 text-sm font-medium text-zinc-700">
         <input class="rounded border-zinc-300" type="checkbox" name="sync_enabled" {% if source is none or source.sync_enabled %}checked{% endif %}>
         Sync enabled

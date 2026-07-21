@@ -184,6 +184,18 @@
                 {% if asset.ai_enrichment_confidence is not none %}
                   <span class="inline-flex rounded border border-zinc-200 bg-white px-2 py-1 text-xs font-medium text-zinc-700">AI {{ "%.2f"|format(asset.ai_enrichment_confidence) }}</span>
                 {% endif %}
+                {% if asset.type == "video" and asset.duration_seconds and asset.duration_seconds > long_video_threshold_seconds %}
+                  <span class="inline-flex rounded border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700">Long</span>
+                {% endif %}
+                {% if asset.segmentation_status in ["ready", "partial"] %}
+                  <span class="inline-flex rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">Segmented</span>
+                {% endif %}
+                {% if asset.is_derivative %}
+                  <span class="inline-flex rounded border border-violet-200 bg-violet-50 px-2 py-1 text-xs font-semibold text-violet-700">Derivative</span>
+                {% endif %}
+                {% if asset.original_delete_status == "deleted" %}
+                  <span class="inline-flex rounded border border-zinc-300 bg-zinc-100 px-2 py-1 text-xs font-semibold text-zinc-700">Original deleted</span>
+                {% endif %}
                 {% if asset.ai_enrichment_status == "failed" and asset.ai_error %}
                   <span class="max-w-xs truncate rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700" title="{{ asset.ai_error }}">{{ asset.ai_error }}</span>
                 {% elif asset.needs_human_review and asset.review_reason %}
