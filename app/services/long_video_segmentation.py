@@ -71,6 +71,7 @@ def segment_long_video_asset(
     derived_remote: str | None = None,
     derived_root: str | None = None,
     skip_ai: bool = False,
+    raw_video_id: int | None = None,
 ) -> AssetSegmentationRun:
     settings = get_settings()
     if not settings.long_video_segmentation_enabled:
@@ -202,6 +203,7 @@ def segment_long_video_asset(
                     remote=remote,
                     remote_path=remote_path,
                     naming=naming,
+                    raw_video_id=raw_video_id,
                 )
                 segment_row.child_asset = child
                 segment_row.status = "cataloged"
@@ -563,11 +565,14 @@ def create_derived_asset(
     remote: str,
     remote_path: str,
     naming: SegmentNaming | None = None,
+    raw_video_id: int | None = None,
 ) -> Asset:
     existing = session.scalar(select(Asset).where(Asset.source_id == source.id, Asset.remote_path == remote_path))
     if existing is not None:
         existing.has_audio = False
         existing.source_video = parent.remote_path
+        if raw_video_id is not None:
+            existing.raw_video_id = raw_video_id
         apply_segment_naming_metadata(session, existing, category, naming)
         return existing
     search_text, embedding_text = segment_search_text(parent, title, category, naming)
@@ -578,6 +583,7 @@ def create_derived_asset(
         rclone_remote=remote,
         remote_path=remote_path,
         source_video=parent.remote_path,
+        raw_video_id=raw_video_id,
         source_path=remote_path,
         filename=output_filename,
         file_ext=".mp4",

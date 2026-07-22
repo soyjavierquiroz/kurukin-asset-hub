@@ -544,6 +544,8 @@ Operational rules:
 
 - Originals are never deleted automatically.
 - Derived clips persist `source_video` with the exact `remote_path` of the long video that produced them.
+- `raw_videos` is the control table for scheduled ingestion. It tracks each discovered raw video as `NEW`, `PROCESSING`, `DONE`, or `FAILED`.
+- New derived clips also store `raw_video_id` when processed through the control-table pipeline.
 - Re-running missing ingestion is idempotent: a long video is skipped when at least one asset already has `source_video` equal to that video's `remote_path`.
 - Derived clips are uploaded with high quality H.264 encode, CRF/preset from config, same resolution by default, no audio, and `+faststart`.
 - Derived clips are b-rolls and are exported without audio by default with `SEGMENT_STRIP_AUDIO=true`.
@@ -562,12 +564,22 @@ CLI examples:
 ```bash
 python scripts/segment_long_videos.py --asset-id 123 --derived-remote gdrive_stock_derived_brolls --derived-root ""
 python scripts/segment_long_videos.py --source-id drive_stock_raw_long --limit 5 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+python -m scripts.segment_long_videos --sync
 python -m scripts.segment_long_videos --missing --limit 50 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+python -m scripts.segment_long_videos --retry-failed --limit 10 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+python -m scripts.segment_long_videos --resume --limit 10 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+python -m scripts.segment_long_videos --status
 python -m scripts.backfill_asset_source_video --dry-run
 python -m scripts.backfill_asset_source_video
+python -m scripts.backfill_raw_videos --dry-run
+python -m scripts.backfill_raw_videos
 ```
 
-`--missing` targets the daily people raw-long source (`gdrive_people_raw_long`) and prints `videos_found`, `videos_processed`, `videos_skipped`, `segments_generated`, and `errors`. Existing derived clips created before `source_video` can be backfilled when they still have a known `parent_asset_id`; uncertain rows are left `NULL`.
+`--sync` discovers files from `gdrive_people_raw_long` into `raw_videos` without processing them. `--missing` syncs, claims `NEW` rows transactionally, processes them, and marks them `DONE` or `FAILED`. `--retry-failed` claims only failed rows. `--resume` first marks interrupted `PROCESSING` rows as `FAILED` with `Interrupted processing`, then processes `NEW` rows. The command prints `videos_found`, `videos_new`, `videos_processed`, `videos_skipped`, `videos_failed`, and `segments_generated`.
+
+Existing derived clips created before `source_video` can be backfilled when they still have a known `parent_asset_id`; uncertain rows are left `NULL`. Existing clips with `source_video` can be backfilled into `raw_videos` and linked through `raw_video_id`.
+
+Read-only API endpoints are available at `/api/raw-videos`, `/api/raw-videos/{id}`, and `/api/raw-videos/status`.
 
 Review in UI:
 

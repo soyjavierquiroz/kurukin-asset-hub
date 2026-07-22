@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from app.models.collection import Collection
     from app.models.niche import Niche
     from app.models.product import Product
+    from app.models.raw_video import RawVideo
     from app.models.source import Source
 
 ASSET_TYPE_VALUES = ("video", "image", "audio", "unknown")
@@ -142,6 +143,7 @@ class Asset(TimestampMixin, Base):
         Index("ix_assets_source_status", "source_status"),
         Index("ix_assets_source_id_remote_file_id", "source_id", "remote_file_id"),
         Index("ix_assets_source_video", "source_video"),
+        Index("ix_assets_raw_video_id", "raw_video_id"),
         Index("ix_assets_parent_asset_id", "parent_asset_id"),
         Index("ix_assets_is_derivative", "is_derivative"),
         Index("ix_assets_segmentation_status", "segmentation_status"),
@@ -154,6 +156,7 @@ class Asset(TimestampMixin, Base):
     rclone_remote: Mapped[str | None] = mapped_column(String(255))
     remote_path: Mapped[str] = mapped_column(String(1200), nullable=False)
     source_video: Mapped[str | None] = mapped_column(String(1200))
+    raw_video_id: Mapped[int | None] = mapped_column(ForeignKey("raw_videos.id"))
     source_path: Mapped[str | None] = mapped_column(String(1200))
     drive_file_id: Mapped[str | None] = mapped_column(String(255))
     remote_file_id: Mapped[str | None] = mapped_column(String(255))
@@ -417,6 +420,7 @@ class Asset(TimestampMixin, Base):
     reuse_cooldown_days: Mapped[int | None] = mapped_column(Integer)
 
     source: Mapped["Source"] = relationship(back_populates="assets")
+    raw_video: Mapped["RawVideo | None"] = relationship(back_populates="assets")
     parent_asset: Mapped["Asset | None"] = relationship(
         "Asset",
         remote_side=[id],
