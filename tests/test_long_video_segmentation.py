@@ -11,6 +11,7 @@ from app.models import Asset, Brand, JobAssetBundleItem, Product, Source
 from app.services import long_video_segmentation as svc
 from app.services.asset_selection import eligible_selection_base_filter
 from app.services.renderer_manifest import build_renderer_asset_entry
+from scripts.backfill_asset_source_video import main as backfill_source_video_main
 from scripts.segment_long_videos import parse_args
 
 
@@ -185,6 +186,7 @@ def test_child_asset_inherits_policy_and_starts_pending(
     assert children[0].usage_scope == parent.usage_scope
     assert children[0].rights_status == parent.rights_status
     assert children[0].preview_status == "pending"
+    assert children[0].source_video == parent.remote_path
     assert children[0].technical_metadata_status == "pending"
     assert children[0].ai_enrichment_status == "pending"
     assert children[0].has_audio is False
@@ -292,6 +294,86 @@ def test_parse_args_preserves_empty_derived_root(monkeypatch: pytest.MonkeyPatch
     args = parse_args()
 
     assert args.derived_root == ""
+
+
+def test_parse_args_accepts_missing_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["segment_long_videos.py", "--missing"])
+
+    args = parse_args()
+
+    assert args.missing is True
+
+
+def test_source_batch_is_idempotent_by_source_video(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = seed_parent(session)
+    patch_successful_pipeline(monkeypatch)
+
+    first_runs = svc.segment_long_videos_for_source(
+        session,
+        "drive_stock_raw_long",
+        derived_remote="derived",
+        derived_root="",
+    )
+    second_runs = svc.segment_long_videos_for_source(
+        session,
+        "drive_stock_raw_long",
+        derived_remote="derived",
+        derived_root="",
+    )
+    children = session.scalars(select(Asset).where(Asset.parent_asset_id == parent.id)).all()
+
+    assert len(first_runs) == 1
+    assert first_runs[0].report_json["children_created"] == 2
+    assert len(second_runs) == 1
+    assert second_runs[0].report_json["skipped"] is True
+    assert second_runs[0].report_json["reason"] == "already_processed"
+    assert len(children) == 2
+    assert {child.source_video for child in children} == {parent.remote_path}
+
+
+def test_backfill_source_video_uses_known_parent_only(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parent = seed_parent(session)
+    child = Asset(
+        asset_uid="asset-child-001",
+        source=parent.source,
+        provider="google_drive",
+        rclone_remote="derived",
+        remote_path="couples/a.mp4",
+        filename="a.mp4",
+        type="video",
+        parent_asset=parent,
+        is_derivative=True,
+    )
+    orphan = Asset(
+        asset_uid="asset-orphan-001",
+        source=parent.source,
+        provider="google_drive",
+        rclone_remote="derived",
+        remote_path="couples/b.mp4",
+        filename="b.mp4",
+        type="video",
+        parent_asset_id=999999,
+        is_derivative=True,
+    )
+    session.add_all([child, orphan])
+    session.commit()
+    monkeypatch.setattr("scripts.backfill_asset_source_video.SessionLocal", lambda: session)
+    monkeypatch.setattr("sys.argv", ["backfill_asset_source_video.py"])
+
+    assert backfill_source_video_main() == 0
+
+    output = capsys.readouterr().out
+    assert '"updated": 1' in output
+    assert '"left_null": 1' in output
+    assert child.source_video == parent.remote_path
+    assert orphan.source_video is None
 
 
 def test_invalid_ai_category_falls_back_to_other(

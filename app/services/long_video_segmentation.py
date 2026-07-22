@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from app.services.rclone_service import RcloneService, sanitize_rclone_message
 
 CATEGORY_FALLBACK = "other"
 PERSON_SEGMENT_CATEGORIES = {"women", "men", "couples", "family", "business", "health", "spiritual", "other"}
+logger = logging.getLogger(__name__)
 
 
 class LongVideoSegmentationError(RuntimeError):
@@ -85,8 +87,13 @@ def segment_long_video_asset(
         raise LongVideoSegmentationError("Asset is not a video")
     if parent.is_derivative and not force:
         raise LongVideoSegmentationError("Derivative assets are not segmented")
-    if parent.segmentation_status in {"processing", "ready"} and not force:
-        raise LongVideoSegmentationError("Asset is already segmented or processing")
+
+    if not force and (parent.segmentation_status == "ready" or source_video_already_processed(session, parent.remote_path)):
+        return skip_already_processed_video(session, parent, created_by=created_by)
+    if parent.segmentation_status == "processing" and not force:
+        raise LongVideoSegmentationError("Asset is already processing")
+
+    logger.info("PROCESS %s", parent.remote_path)
 
     now = datetime.now(UTC)
     config = segmentation_config()
@@ -200,6 +207,7 @@ def segment_long_video_asset(
                 segment_row.status = "cataloged"
                 segment_row.updated_at = datetime.now(UTC)
                 session.commit()
+                logger.info("GENERATED asset=%s", child.id)
                 generate_child_enrichment(session, child.id, skip_ai=skip_ai)
                 created_count += 1
             except Exception as exc:
@@ -224,6 +232,7 @@ def segment_long_video_asset(
             "remote_paths": uploaded_remote_paths,
         }
         session.commit()
+        logger.info("FINISHED")
         return run
     except Exception as exc:
         session.rollback()
@@ -266,7 +275,6 @@ def segment_long_videos_for_source(
     if not force:
         query = query.where(
             Asset.duration_seconds > settings.long_video_threshold_seconds,
-            Asset.segmentation_status.is_distinct_from("ready"),
         )
     runs = []
     for asset_id in session.scalars(query).all():
@@ -282,6 +290,33 @@ def segment_long_videos_for_source(
             )
         )
     return runs
+
+
+def source_video_already_processed(session: Session, source_video: str) -> bool:
+    return session.scalar(select(func.count(Asset.id)).where(Asset.source_video == source_video)) > 0
+
+
+def skip_already_processed_video(
+    session: Session,
+    parent: Asset,
+    created_by: str | None = None,
+) -> AssetSegmentationRun:
+    logger.info("SKIP %s (already processed)", parent.remote_path)
+    parent.segmentation_status = "ready"
+    parent.auto_select_enabled = False
+    run = AssetSegmentationRun(
+        run_uid=f"seg-{uuid4().hex}",
+        parent_asset=parent,
+        status="ready",
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        config_json=segmentation_config(),
+        report_json={"skipped": True, "reason": "already_processed", "children_created": 0},
+        created_by=created_by,
+    )
+    session.add(run)
+    session.commit()
+    return run
 
 
 def detect_video_segments(input_path: Path, config: dict[str, object]) -> list[SegmentPlan]:
@@ -532,6 +567,7 @@ def create_derived_asset(
     existing = session.scalar(select(Asset).where(Asset.source_id == source.id, Asset.remote_path == remote_path))
     if existing is not None:
         existing.has_audio = False
+        existing.source_video = parent.remote_path
         apply_segment_naming_metadata(session, existing, category, naming)
         return existing
     search_text, embedding_text = segment_search_text(parent, title, category, naming)
@@ -541,6 +577,7 @@ def create_derived_asset(
         provider=parent.provider,
         rclone_remote=remote,
         remote_path=remote_path,
+        source_video=parent.remote_path,
         source_path=remote_path,
         filename=output_filename,
         file_ext=".mp4",

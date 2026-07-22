@@ -543,6 +543,8 @@ Assets/stock/derived-brolls/
 Operational rules:
 
 - Originals are never deleted automatically.
+- Derived clips persist `source_video` with the exact `remote_path` of the long video that produced them.
+- Re-running missing ingestion is idempotent: a long video is skipped when at least one asset already has `source_video` equal to that video's `remote_path`.
 - Derived clips are uploaded with high quality H.264 encode, CRF/preset from config, same resolution by default, no audio, and `+faststart`.
 - Derived clips are b-rolls and are exported without audio by default with `SEGMENT_STRIP_AUDIO=true`.
 - Temporary local files are removed after the run.
@@ -560,7 +562,12 @@ CLI examples:
 ```bash
 python scripts/segment_long_videos.py --asset-id 123 --derived-remote gdrive_stock_derived_brolls --derived-root ""
 python scripts/segment_long_videos.py --source-id drive_stock_raw_long --limit 5 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+python -m scripts.segment_long_videos --missing --limit 50 --derived-remote gdrive_stock_derived_brolls --derived-root ""
+python -m scripts.backfill_asset_source_video --dry-run
+python -m scripts.backfill_asset_source_video
 ```
+
+`--missing` targets the daily people raw-long source (`gdrive_people_raw_long`) and prints `videos_found`, `videos_processed`, `videos_skipped`, `segments_generated`, and `errors`. Existing derived clips created before `source_video` can be backfilled when they still have a known `parent_asset_id`; uncertain rows are left `NULL`.
 
 Review in UI:
 
