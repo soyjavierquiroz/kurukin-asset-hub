@@ -8,8 +8,8 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.models import Asset, RawVideo
-from app.services.asset_indexer import VIDEO_EXTENSIONS
+from app.models import Asset, RawVideo, Source
+from app.services.asset_indexer import AssetIndexContext, AssetIndexer, VIDEO_EXTENSIONS
 from app.services.long_video_segmentation import (
     LongVideoSegmentationError,
     sanitize_segmentation_error,
@@ -45,8 +45,11 @@ def sync_raw_videos(
     root: str = "",
     provider: str = DEFAULT_RAW_VIDEO_PROVIDER,
     rclone: RcloneService | None = None,
+    sync_parent_assets: bool = True,
 ) -> RawVideoSyncSummary:
     entries = (rclone or RcloneService()).list_json(remote, root)
+    if sync_parent_assets:
+        index_parent_assets(session, entries=entries, remote=remote, root=root)
     now = datetime.now(UTC)
     found = 0
     created = 0
@@ -81,6 +84,52 @@ def sync_raw_videos(
 
     session.commit()
     return RawVideoSyncSummary(videos_found=found, videos_new=created, videos_existing=existing)
+
+
+def index_parent_assets(
+    session: Session,
+    entries: list[dict[str, Any]],
+    remote: str,
+    root: str,
+) -> None:
+    source = find_raw_long_source(session, remote=remote, root=root)
+    source_id = source.source_id if source is not None else remote
+    AssetIndexer(session).index_entries(
+        entries,
+        AssetIndexContext(
+            source_id=source_id,
+            remote=remote,
+            root=root,
+            provider="google_drive",
+        ),
+    )
+    if source is not None:
+        refreshed = session.scalar(select(Source).where(Source.source_id == source_id))
+        if refreshed is not None:
+            refreshed.source_role = refreshed.source_role or source.source_role
+            refreshed.derived_rclone_remote = refreshed.derived_rclone_remote or source.derived_rclone_remote
+            refreshed.derived_root_path = (
+                refreshed.derived_root_path
+                if refreshed.derived_root_path is not None
+                else source.derived_root_path
+            )
+            refreshed.derived_source_id = refreshed.derived_source_id or source.derived_source_id
+
+
+def find_raw_long_source(session: Session, remote: str, root: str) -> Source | None:
+    clean_root = root.strip("/")
+    candidates = session.scalars(
+        select(Source)
+        .where(Source.rclone_remote == remote)
+        .order_by(Source.id.asc())
+    ).all()
+    for source in candidates:
+        if (source.root_path or "").strip("/") == clean_root and source.source_role == "raw_long":
+            return source
+    for source in candidates:
+        if (source.root_path or "").strip("/") == clean_root:
+            return source
+    return session.scalar(select(Source).where(Source.source_id == remote))
 
 
 def process_raw_videos(

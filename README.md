@@ -577,7 +577,7 @@ python -m scripts.backfill_raw_videos --dry-run
 python -m scripts.backfill_raw_videos
 ```
 
-`--sync` discovers files from `gdrive_people_raw_long` into `raw_videos` without processing them. `--missing` syncs, claims `NEW` rows transactionally, processes them, and marks them `DONE` or `FAILED`. `--retry-failed` claims only failed rows. `--resume` first marks interrupted `PROCESSING` rows as `FAILED` with `Interrupted processing`, then processes `NEW` rows. The command prints `videos_found`, `videos_new`, `videos_processed`, `videos_skipped`, `videos_failed`, and `segments_generated`.
+`--sync` discovers files from `gdrive_people_raw_long` into `raw_videos` and also indexes the matching raw parent assets using the configured raw-long `Source`. `--missing` syncs, claims `NEW` rows transactionally, processes them, and marks them `DONE` or `FAILED`. `--retry-failed` claims only failed rows. `--resume` first marks interrupted `PROCESSING` rows as `FAILED` with `Interrupted processing`, then processes `NEW` rows. The command prints `videos_found`, `videos_new`, `videos_processed`, `videos_skipped`, `videos_failed`, and `segments_generated`.
 
 Existing derived clips created before `source_video` can be backfilled when they still have a known `parent_asset_id`; uncertain rows are left `NULL`. Existing clips with `source_video` can be backfilled into `raw_videos` and linked through `raw_video_id`.
 

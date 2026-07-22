@@ -81,6 +81,39 @@ def test_sync_raw_videos_detects_new_and_avoids_duplicates() -> None:
     assert raw_videos[0].remote_path == "video-a.mp4"
 
 
+def test_sync_raw_videos_indexes_parent_assets_with_existing_raw_source() -> None:
+    session = make_session()
+    source = Source(
+        source_id="drive_people_raw_long",
+        provider="google_drive",
+        label="People raw long",
+        rclone_remote="gdrive_people_raw_long",
+        root_path="",
+        source_role="raw_long",
+        derived_rclone_remote="gdrive_people_derived_brolls",
+        derived_root_path="",
+        derived_source_id="drive_people_derived_brolls",
+    )
+    session.add(source)
+    session.commit()
+    rclone = FakeRclone([{"Path": "new-video.mp4", "Name": "new-video.mp4", "Size": 100}])
+
+    summary = svc.sync_raw_videos(session, rclone=rclone)
+    parent = session.scalar(
+        select(Asset).where(
+            Asset.remote_path == "new-video.mp4",
+            Asset.type == "video",
+            Asset.is_derivative.is_(False),
+        )
+    )
+
+    assert summary.videos_new == 1
+    assert parent is not None
+    assert parent.source_id == source.id
+    assert parent.rclone_remote == "gdrive_people_raw_long"
+    assert source.derived_rclone_remote == "gdrive_people_derived_brolls"
+
+
 def test_claim_raw_video_is_atomic_by_status() -> None:
     session = make_session()
     raw_video = RawVideo(
