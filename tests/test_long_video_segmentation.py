@@ -61,6 +61,7 @@ def seed_parent(session: Session, duration: float = 90.0) -> Asset:
 
 def patch_successful_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc.RcloneService, "copyto", lambda *args, **kwargs: None)
+    monkeypatch.setattr(svc.RcloneService, "remote_exists", lambda *args, **kwargs: True)
     monkeypatch.setattr(svc, "export_segment", lambda *args, **kwargs: None)
     monkeypatch.setattr(svc, "extract_segment_thumbnail", lambda *args, **kwargs: None)
     monkeypatch.setattr(svc, "upload_segment_to_drive", lambda *args, **kwargs: None)
@@ -194,6 +195,46 @@ def test_child_asset_inherits_policy_and_starts_pending(
     assert parent.has_audio is True
     assert parent.auto_select_enabled is False
     assert parent.delete_original_eligible is True
+
+
+def test_missing_derived_remote_is_failed_before_download(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = seed_parent(session)
+    copied = []
+    monkeypatch.setattr(svc.RcloneService, "remote_exists", lambda *args, **kwargs: False)
+    monkeypatch.setattr(svc.RcloneService, "copyto", lambda *args, **kwargs: copied.append(args))
+
+    run = svc.segment_long_video_asset(session, parent.id, derived_remote="missing", derived_root="")
+
+    assert run.status == "failed"
+    assert "Derived rclone remote not found: missing" in (run.error or "")
+    assert copied == []
+
+
+def test_failed_segmentation_preserves_temp_dir(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = seed_parent(session)
+    removed = []
+    patch_successful_pipeline(monkeypatch)
+
+    def fail_upload(*args, **kwargs):
+        raise RuntimeError("upload failed")
+
+    monkeypatch.setattr(svc, "upload_segment_to_drive", fail_upload)
+    monkeypatch.setattr(svc.shutil, "rmtree", lambda path, ignore_errors=True: removed.append(path))
+
+    run = svc.segment_long_video_asset(session, parent.id, derived_remote="derived", derived_root="")
+
+    assert run.status == "failed"
+    assert run.error == "Segmentation failed; temporary files preserved"
+    assert isinstance(run.report_json, dict)
+    assert run.report_json["children_created"] == 0
+    assert run.report_json["temp_dir"]
+    assert removed == []
 
 
 def test_ai_valid_category_is_used_in_remote_path(

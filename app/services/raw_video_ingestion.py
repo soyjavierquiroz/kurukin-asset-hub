@@ -14,6 +14,7 @@ from app.services.long_video_segmentation import (
     LongVideoSegmentationError,
     sanitize_segmentation_error,
     segment_long_video_asset,
+    validate_rclone_remote_exists,
 )
 from app.services.rclone_service import RcloneService
 
@@ -94,6 +95,8 @@ def process_raw_videos(
 ) -> RawVideoProcessSummary:
     if resume:
         mark_interrupted_processing(session)
+    if derived_remote:
+        validate_rclone_remote_exists(derived_remote, role="derived")
 
     raw_videos = session.scalars(
         select(RawVideo)
@@ -126,6 +129,12 @@ def process_raw_videos(
             created = int(report.get("children_created") or 0)
             if report.get("skipped") and report.get("reason") == "already_processed":
                 created = link_assets_for_raw_video(session, claimed)
+            if getattr(run, "status", None) == "failed" or (created == 0 and not report.get("skipped")):
+                message = getattr(run, "error", None) or "Segmentation finished without generated assets"
+                mark_raw_video_failed(session, claimed.id, message)
+                summary.videos_failed += 1
+                summary.runs.append({"raw_video_id": claimed.id, "run_id": run.id, "report": report})
+                continue
             mark_raw_video_done(session, claimed.id, segments_generated=created)
             summary.videos_processed += 1
             summary.segments_generated += created

@@ -546,6 +546,8 @@ Operational rules:
 - Derived clips persist `source_video` with the exact `remote_path` of the long video that produced them.
 - `raw_videos` is the control table for scheduled ingestion. It tracks each discovered raw video as `NEW`, `PROCESSING`, `DONE`, or `FAILED`.
 - New derived clips also store `raw_video_id` when processed through the control-table pipeline.
+- The derived rclone remote is validated before downloading, cutting, or calling AI so a typo cannot waste a segmentation run.
+- Failed runs preserve their temporary working directory and include `temp_dir` in the run report for inspection or recovery.
 - Re-running missing ingestion is idempotent: a long video is skipped when at least one asset already has `source_video` equal to that video's `remote_path`.
 - Derived clips are uploaded with high quality H.264 encode, CRF/preset from config, same resolution by default, no audio, and `+faststart`.
 - Derived clips are b-rolls and are exported without audio by default with `SEGMENT_STRIP_AUDIO=true`.

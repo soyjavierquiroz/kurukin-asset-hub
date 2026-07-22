@@ -100,6 +100,18 @@ class RcloneService:
             entries.append(item)
         return entries
 
+    def list_remotes(self) -> list[str]:
+        result = self._run([self.binary, "listremotes"], operation="listremotes", timeout=60)
+        remotes = []
+        for line in result.stdout.splitlines():
+            remote = line.strip().rstrip(":")
+            if remote:
+                remotes.append(remote)
+        return remotes
+
+    def remote_exists(self, remote: str) -> bool:
+        return remote.strip().rstrip(":") in set(self.list_remotes())
+
     def _run(
         self,
         command: list[str],

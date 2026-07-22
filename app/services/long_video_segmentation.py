@@ -128,12 +128,18 @@ def segment_long_video_asset(
     if not remote:
         fail_run(session, parent, run, "Missing derived rclone remote")
         return run
+    try:
+        validate_rclone_remote_exists(remote, role="derived")
+    except LongVideoSegmentationError as exc:
+        fail_run(session, parent, run, str(exc))
+        return run
 
     created_count = 0
     failed_count = 0
     segment_count = 0
     uploaded_remote_paths: list[str] = []
     temp_dir = Path(tempfile.mkdtemp(prefix="asset-hub-segments-"))
+    preserve_temp_dir = False
     try:
         input_path = temp_dir / safe_filename(parent.filename)
         RcloneService().copyto(parent.rclone_remote or "", parent.remote_path, str(input_path))
@@ -222,6 +228,7 @@ def segment_long_video_asset(
                     session.commit()
                 failed_count += 1
 
+        preserve_temp_dir = created_count == 0 and failed_count > 0
         mark_parent_segmented(session, parent.id, segment_count, created_count, failed_count)
         run.status = "ready" if created_count and not failed_count else "partial" if created_count else "failed"
         run.completed_at = datetime.now(UTC)
@@ -233,19 +240,32 @@ def segment_long_video_asset(
             "derived_root": root,
             "remote_paths": uploaded_remote_paths,
         }
+        if preserve_temp_dir:
+            run.report_json["temp_dir"] = str(temp_dir)
+            run.error = "Segmentation failed; temporary files preserved"
         session.commit()
         logger.info("FINISHED")
         return run
     except Exception as exc:
         session.rollback()
+        preserve_temp_dir = True
         fresh_parent = session.get(Asset, parent.id)
         fresh_run = session.get(AssetSegmentationRun, run.id)
         if fresh_parent is not None and fresh_run is not None:
-            fail_run(session, fresh_parent, fresh_run, str(exc))
+            fail_run(
+                session,
+                fresh_parent,
+                fresh_run,
+                str(exc),
+                extra_report={"temp_dir": str(temp_dir)},
+            )
             return fresh_run
         raise
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        if not preserve_temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        else:
+            logger.warning("PRESERVED_TEMP_DIR %s", temp_dir)
 
 
 def segment_long_videos_for_source(
@@ -554,6 +574,21 @@ def upload_segment_to_drive(local_clip_path: Path, remote_name: str, remote_path
     RcloneService().copyto_local_to_remote(str(local_clip_path), remote_name, remote_path)
 
 
+def validate_rclone_remote_exists(remote: str, role: str = "rclone") -> None:
+    clean_remote = clean_text(remote)
+    if not clean_remote:
+        raise LongVideoSegmentationError(f"Missing {role} rclone remote")
+    try:
+        if not RcloneService().remote_exists(clean_remote):
+            raise LongVideoSegmentationError(
+                f"{role.capitalize()} rclone remote not found: {clean_remote}"
+            )
+    except LongVideoSegmentationError:
+        raise
+    except Exception as exc:
+        raise LongVideoSegmentationError(f"Could not validate {role} rclone remote: {exc}") from exc
+
+
 def create_derived_asset(
     session: Session,
     parent: Asset,
@@ -782,7 +817,13 @@ def generate_child_enrichment(session: Session, child_id: int, skip_ai: bool = F
         enrich_asset_with_ai(session, child_id, force=False)
 
 
-def fail_run(session: Session, parent: Asset, run: AssetSegmentationRun, message: str) -> None:
+def fail_run(
+    session: Session,
+    parent: Asset,
+    run: AssetSegmentationRun,
+    message: str,
+    extra_report: dict[str, Any] | None = None,
+) -> None:
     safe = sanitize_segmentation_error(message)
     parent.segmentation_status = "failed"
     parent.auto_select_enabled = False
@@ -790,6 +831,8 @@ def fail_run(session: Session, parent: Asset, run: AssetSegmentationRun, message
     run.completed_at = datetime.now(UTC)
     run.error = safe
     run.report_json = {"children_created": 0, "error": safe}
+    if extra_report:
+        run.report_json.update(extra_report)
     session.commit()
 
 

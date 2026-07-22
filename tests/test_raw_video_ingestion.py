@@ -152,6 +152,61 @@ def test_process_raw_video_transitions_new_to_failed(monkeypatch) -> None:
     assert "boom" in (raw_video.last_error or "")
 
 
+def test_process_raw_video_marks_zero_generated_run_as_failed(monkeypatch) -> None:
+    session = make_session()
+    parent = seed_parent_asset(session)
+    raw_video = RawVideo(
+        remote_path=parent.remote_path,
+        provider=svc.DEFAULT_RAW_VIDEO_PROVIDER,
+        status="NEW",
+        last_seen_at=datetime.now(UTC),
+    )
+    session.add(raw_video)
+    session.commit()
+    monkeypatch.setattr(
+        svc,
+        "segment_long_video_asset",
+        lambda **kwargs: SimpleNamespace(
+            id=88,
+            status="failed",
+            error=None,
+            report_json={"segments_planned": 2, "children_created": 0, "failed": 2},
+        ),
+    )
+
+    summary = svc.process_raw_videos(session, limit=5)
+
+    assert summary.videos_processed == 0
+    assert summary.videos_failed == 1
+    assert raw_video.status == "FAILED"
+    assert raw_video.processed_at is None
+    assert raw_video.last_error == "Segmentation finished without generated assets"
+
+
+def test_process_raw_video_validates_derived_remote_before_claim(monkeypatch) -> None:
+    session = make_session()
+    parent = seed_parent_asset(session)
+    raw_video = RawVideo(
+        remote_path=parent.remote_path,
+        provider=svc.DEFAULT_RAW_VIDEO_PROVIDER,
+        status="NEW",
+        last_seen_at=datetime.now(UTC),
+    )
+    session.add(raw_video)
+    session.commit()
+    def missing_remote(*args, **kwargs):
+        raise RuntimeError("missing remote")
+
+    monkeypatch.setattr(svc, "validate_rclone_remote_exists", missing_remote)
+
+    try:
+        svc.process_raw_videos(session, derived_remote="missing")
+    except RuntimeError as exc:
+        assert str(exc) == "missing remote"
+
+    assert raw_video.status == "NEW"
+
+
 def test_retry_failed_processes_only_failed(monkeypatch) -> None:
     session = make_session()
     parent = seed_parent_asset(session, "failed.mp4")
