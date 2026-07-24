@@ -92,6 +92,8 @@ def generate_asset_preview(session: Session, asset_id: int, force: bool = False)
             preview_file = output_dir / "preview.mp4"
             generate_video_thumbnail(download_path, thumbnail_file, metadata.duration_seconds)
             generate_video_preview(download_path, preview_file)
+            validate_preview_file(thumbnail_file)
+            validate_preview_file(preview_file)
             thumbnail_path = relative_thumbnail_path_for_asset(asset.id)
             preview_path = relative_preview_path_for_asset(asset.id, "preview.mp4")
         elif asset.type == "image":

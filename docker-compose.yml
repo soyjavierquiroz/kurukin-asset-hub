@@ -14,6 +14,7 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       ASSET_HUB_API_KEY: ${ASSET_HUB_API_KEY:-change-me}
+      RCLONE_CONFIG: ${RCLONE_CONFIG:-/config/rclone/rclone.conf}
       PREVIEW_STORAGE_DIR: ${PREVIEW_STORAGE_DIR:-/data/previews}
       JOB_ASSETS_STORAGE_DIR: ${JOB_ASSETS_STORAGE_DIR:-/data/job-assets}
       JOB_ASSET_MATERIALIZATION_ENABLED: ${JOB_ASSET_MATERIALIZATION_ENABLED:-true}
@@ -38,6 +39,7 @@ services:
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
+      - /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro
       - previews:/data/previews
       - job_assets:/data/job-assets
     networks:

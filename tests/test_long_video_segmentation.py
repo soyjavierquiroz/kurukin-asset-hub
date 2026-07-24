@@ -535,8 +535,14 @@ def test_child_preview_uses_stored_remote_path(
             "streams": [{"codec_type": "video", "width": 1920, "height": 1080, "avg_frame_rate": "30/1"}],
         },
     )
-    monkeypatch.setattr("app.services.asset_preview.generate_video_thumbnail", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.services.asset_preview.generate_video_preview", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.services.asset_preview.generate_video_thumbnail",
+        lambda _input, output, _duration=None: output.write_bytes(b"thumbnail"),
+    )
+    monkeypatch.setattr(
+        "app.services.asset_preview.generate_video_preview",
+        lambda _input, output: output.write_bytes(b"preview"),
+    )
 
     assert child is not None
     svc.generate_asset_preview(session, child.id, force=True)
