@@ -21,7 +21,14 @@ from app.config import get_settings
 from app.models import Asset, AssetKeyword, AssetSegment, AssetSegmentationRun, Source
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
 from app.services.asset_preview import generate_asset_preview, run_ffprobe, sanitize_error_message
-from app.services.ai_providers.openai_provider import DEFAULT_OPENAI_MODEL, image_to_data_url, sanitize_provider_error
+from app.services.ai_providers.openai_provider import (
+    DEFAULT_NVIDIA_MODEL,
+    DEFAULT_OPENAI_MODEL,
+    NVIDIA_BASE_URL,
+    extract_chat_output_text,
+    image_to_data_url,
+    sanitize_provider_error,
+)
 from app.services.rclone_service import RcloneService, sanitize_rclone_message
 
 CATEGORY_FALLBACK = "other"
@@ -529,33 +536,51 @@ def build_segment_naming_prompt(parent_asset: Asset, plan: SegmentPlan) -> str:
 
 def call_openai_segment_naming(prompt: str, image_paths: list[Path]) -> SegmentNamingPayload:
     settings = get_settings()
-    if not settings.openai_api_key:
-        raise LongVideoSegmentationError("OPENAI_API_KEY is not configured")
+    nvidia_api_key = settings.nvidia_api_key
+    if not nvidia_api_key and not settings.openai_api_key:
+        raise LongVideoSegmentationError("NVIDIA_API_KEY or OPENAI_API_KEY is not configured")
     try:
         from openai import OpenAI
     except ImportError as exc:
         raise LongVideoSegmentationError("openai package is not installed") from exc
 
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
-    content.extend({"type": "input_image", "image_url": image_to_data_url(path)} for path in image_paths)
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    content.extend({"type": "image_url", "image_url": {"url": image_to_data_url(path)}} for path in image_paths)
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "segment_naming",
+            "schema": segment_naming_json_schema(),
+            "strict": True,
+        },
+    }
     try:
+        if nvidia_api_key:
+            try:
+                nvidia_client = OpenAI(
+                    api_key=nvidia_api_key,
+                    base_url=NVIDIA_BASE_URL,
+                    timeout=45.0,
+                    max_retries=1,
+                )
+                response = nvidia_client.chat.completions.create(
+                    model=settings.ai_model or DEFAULT_NVIDIA_MODEL,
+                    messages=[{"role": "user", "content": content}],
+                    response_format=response_format,
+                )
+                return SegmentNamingPayload.model_validate_json(extract_chat_output_text(response))
+            except Exception as exc:
+                if not settings.openai_api_key:
+                    raise
+                logger.warning("NVIDIA API failed, falling back to OpenAI: %s", sanitize_provider_error(str(exc)))
+
         client = OpenAI(api_key=settings.openai_api_key, timeout=45.0, max_retries=1)
-        response = client.responses.create(
+        response = client.chat.completions.create(
             model=settings.ai_model or DEFAULT_OPENAI_MODEL,
-            input=[{"role": "user", "content": content}],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "segment_naming",
-                    "schema": segment_naming_json_schema(),
-                    "strict": True,
-                }
-            },
+            messages=[{"role": "user", "content": content}],
+            response_format=response_format,
         )
-        output_text = getattr(response, "output_text", None)
-        if not isinstance(output_text, str) or not output_text.strip():
-            output_text = json.dumps(response.model_dump() if hasattr(response, "model_dump") else response)
-        return SegmentNamingPayload.model_validate_json(output_text)
+        return SegmentNamingPayload.model_validate_json(extract_chat_output_text(response))
     except Exception as exc:
         raise LongVideoSegmentationError(sanitize_provider_error(str(exc))) from exc
 

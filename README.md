@@ -413,6 +413,7 @@ Configurar:
 
 ```env
 OPENAI_API_KEY=
+NVIDIA_API_KEY=
 AI_ENRICHMENT_ENABLED=false
 AI_PROVIDER=openai
 AI_MODEL=
@@ -421,7 +422,7 @@ AI_REVIEW_THRESHOLD=0.72
 AI_MAX_ASSETS_PER_BATCH=20
 ```
 
-`OPENAI_API_KEY` es opcional para levantar la app web. Para llamadas reales, definir `OPENAI_API_KEY`, poner `AI_ENRICHMENT_ENABLED=true` y, opcionalmente, fijar `AI_MODEL`. Con `AI_ENRICHMENT_ENABLED=false`, los assets se marcan como `skipped` con razón clara, salvo `--dry-run`, que no llama al proveedor ni muta el asset.
+`OPENAI_API_KEY` es opcional para levantar la app web. Para llamadas reales, definir `NVIDIA_API_KEY` para usar NVIDIA Build como proveedor principal, o `OPENAI_API_KEY` para mantener el comportamiento anterior. Si NVIDIA falla y `OPENAI_API_KEY` está definido, el servicio cae automáticamente a OpenAI. Poner `AI_ENRICHMENT_ENABLED=true` y, opcionalmente, fijar `AI_MODEL`. Con `AI_ENRICHMENT_ENABLED=false`, los assets se marcan como `skipped` con razón clara, salvo `--dry-run`, que no llama al proveedor ni muta el asset.
 
 El resultado completo validado se guarda en `AssetAIAnalysis`. El servicio actualiza metadata creativa, flags de seguridad/transformación, `search_text`, `embedding_text`, `best_for`, `avoid_for` y keywords `source=ai`. No borra ni sobrescribe keywords manuales; con `--force` reemplaza sólo keywords previas `source=ai`.
 

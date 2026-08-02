@@ -250,15 +250,21 @@ def test_openai_provider_sends_strict_schema(monkeypatch: pytest.MonkeyPatch) ->
     enable_ai(monkeypatch)
     captured: dict[str, object] = {}
 
-    class FakeResponses:
+    class FakeCompletions:
         def create(self, **kwargs: object) -> object:
             captured["kwargs"] = kwargs
-            return SimpleNamespace(output_text=json.dumps(valid_ai_payload()))
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(valid_ai_payload())),
+                    )
+                ]
+            )
 
     class FakeOpenAI:
         def __init__(self, **kwargs: object) -> None:
             captured["client_kwargs"] = kwargs
-            self.responses = FakeResponses()
+            self.chat = SimpleNamespace(completions=FakeCompletions())
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
 
@@ -266,17 +272,53 @@ def test_openai_provider_sends_strict_schema(monkeypatch: pytest.MonkeyPatch) ->
 
     request = captured["kwargs"]
     assert isinstance(request, dict)
-    text = request["text"]
-    assert isinstance(text, dict)
-    response_format = text["format"]
+    response_format = request["response_format"]
     assert isinstance(response_format, dict)
-    schema = response_format["schema"]
-    assert response_format["name"] == "asset_enrichment"
-    assert response_format["strict"] is True
+    json_schema = response_format["json_schema"]
+    assert isinstance(json_schema, dict)
+    schema = json_schema["schema"]
+    assert json_schema["name"] == "asset_enrichment"
+    assert json_schema["strict"] is True
     assert isinstance(schema, dict)
     assert set(schema["required"]) == set(schema["properties"])
     assert not contains_key(schema, "default")
     assert result.keywords[0].keyword == "Kitchen"
+
+
+def test_openai_provider_falls_back_from_nvidia_to_openai(monkeypatch: pytest.MonkeyPatch) -> None:
+    enable_ai(monkeypatch)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-secret")
+    get_settings.cache_clear()
+    calls: list[dict[str, object]] = []
+
+    class FakeCompletions:
+        def __init__(self, client_kwargs: dict[str, object]) -> None:
+            self.client_kwargs = client_kwargs
+
+        def create(self, **kwargs: object) -> object:
+            calls.append({"client_kwargs": self.client_kwargs, "kwargs": kwargs})
+            if self.client_kwargs.get("base_url") == openai_provider.NVIDIA_BASE_URL:
+                raise RuntimeError("nvidia timeout")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(valid_ai_payload())),
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            self.chat = SimpleNamespace(completions=FakeCompletions(kwargs))
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    result = openai_provider.call_openai_vision("prompt", [Path(__file__)])
+
+    assert result.title == "Warm kitchen detail"
+    assert len(calls) == 2
+    assert calls[0]["client_kwargs"]["base_url"] == openai_provider.NVIDIA_BASE_URL
+    assert "base_url" not in calls[1]["client_kwargs"]
 
 
 def test_enrich_asset_skipped_without_preview(monkeypatch: pytest.MonkeyPatch) -> None:

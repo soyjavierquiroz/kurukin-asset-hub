@@ -29,6 +29,7 @@ class Settings(BaseSettings):
         alias="JOB_ASSET_MATERIALIZATION_ENABLED",
     )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    nvidia_api_key: str | None = Field(default=None, alias="NVIDIA_API_KEY")
     ai_enrichment_enabled: bool = Field(default=False, alias="AI_ENRICHMENT_ENABLED")
     ai_provider: str = Field(default="openai", alias="AI_PROVIDER")
     ai_model: str | None = Field(default=None, alias="AI_MODEL")
