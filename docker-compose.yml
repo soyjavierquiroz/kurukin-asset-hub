@@ -10,7 +10,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-kurukin_asset_hub}
       POSTGRES_USER: ${POSTGRES_USER:-asset_hub}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://asset_hub:change-me@db:5432/kurukin_asset_hub}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://asset_hub:change-me@tasks.db:5432/kurukin_asset_hub}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       ASSET_HUB_API_KEY: ${ASSET_HUB_API_KEY:-change-me}
@@ -66,6 +66,48 @@ services:
         traefik.http.routers.asset-hub.tls.certresolver: le
         traefik.http.services.asset-hub.loadbalancer.server.port: "8000"
 
+  asset-worker:
+    image: ${WEB_IMAGE:-kurukin-asset-hub-web:job-bundle-materialization}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "scripts/run_asset_pipeline_worker.py"]
+    healthcheck:
+      disable: true
+    environment:
+      STACK_NAME: ${STACK_NAME:-kurukin-asset-hub}
+      POSTGRES_DB: ${POSTGRES_DB:-kurukin_asset_hub}
+      POSTGRES_USER: ${POSTGRES_USER:-asset_hub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://asset_hub:change-me@tasks.db:5432/kurukin_asset_hub}
+      RCLONE_CONFIG: ${RCLONE_CONFIG:-/config/rclone/rclone.conf}
+      PREVIEW_STORAGE_DIR: ${PREVIEW_STORAGE_DIR:-/data/previews}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      AI_ENRICHMENT_ENABLED: ${AI_ENRICHMENT_ENABLED:-false}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_OUTPUT_LANGUAGE: ${AI_OUTPUT_LANGUAGE:-es}
+      AI_FRAME_SAMPLE_COUNT: ${AI_FRAME_SAMPLE_COUNT:-8}
+      AI_REVIEW_THRESHOLD: ${AI_REVIEW_THRESHOLD:-0.72}
+      AI_MAX_ASSETS_PER_BATCH: ${AI_MAX_ASSETS_PER_BATCH:-20}
+      ASSET_PIPELINE_ENABLED: ${ASSET_PIPELINE_ENABLED:-true}
+      ASSET_PIPELINE_POLL_SECONDS: ${ASSET_PIPELINE_POLL_SECONDS:-30}
+      ASSET_PIPELINE_BATCH_SIZE: ${ASSET_PIPELINE_BATCH_SIZE:-10}
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro
+      - previews:/data/previews
+    networks:
+      - asset_hub_internal
+    depends_on:
+      - db
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
   db:
     image: postgres:16-alpine
     environment:
@@ -89,10 +131,11 @@ services:
 
 networks:
   asset_hub_internal:
-    driver: overlay
-    attachable: true
+    external: true
+    name: kurukin-asset-hub_asset_hub_internal
   traefik_public:
     external: true
+    name: traefik_public
 
 volumes:
   asset_hub_postgres_data:

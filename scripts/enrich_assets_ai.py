@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.db import SessionLocal
 from app.models import Asset
@@ -41,8 +41,19 @@ def pending_asset_ids(limit: int) -> list[int]:
         return list(
             session.scalars(
                 select(Asset.id)
-                .where(Asset.ai_enrichment_status == "pending")
-                .order_by(Asset.created_at.asc(), Asset.id.asc())
+                .where(
+                    Asset.status == "active",
+                    Asset.source_status == "active",
+                    Asset.ai_enrichment_status == "pending",
+                    Asset.preview_status == "ready",
+                    Asset.type.in_(("image", "video")),
+                    or_(Asset.thumbnail_path.is_not(None), Asset.preview_path.is_not(None)),
+                )
+                .order_by(
+                    Asset.last_indexed_at.desc().nullslast(),
+                    Asset.created_at.desc(),
+                    Asset.id.desc(),
+                )
                 .limit(limit)
             )
         )

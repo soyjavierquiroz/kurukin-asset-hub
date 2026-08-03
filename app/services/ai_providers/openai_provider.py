@@ -37,8 +37,7 @@ def call_openai_vision(
     except ImportError as exc:
         raise OpenAIProviderError("openai package is not installed") from exc
 
-    nvidia_model = model or settings.ai_model or DEFAULT_NVIDIA_MODEL
-    openai_model = model or settings.ai_model or DEFAULT_OPENAI_MODEL
+    nvidia_model, openai_model = resolve_provider_models(model, settings.ai_model)
     content = build_vision_chat_content(prompt, image_paths)
     response_format = {
         "type": "json_schema",
@@ -99,6 +98,17 @@ def extract_chat_output_text(response: Any) -> str:
         if isinstance(content, str) and content.strip():
             return content
     return extract_output_text(response)
+
+
+def resolve_provider_models(model: str | None, configured_model: str | None) -> tuple[str, str]:
+    explicit_model = (model or "").strip()
+    configured = (configured_model or "").strip()
+    requested = explicit_model or configured
+    if requested.startswith("meta/"):
+        return requested, DEFAULT_OPENAI_MODEL
+    if requested:
+        return DEFAULT_NVIDIA_MODEL, requested
+    return DEFAULT_NVIDIA_MODEL, DEFAULT_OPENAI_MODEL
 
 
 def image_to_data_url(path: Path) -> str:

@@ -100,8 +100,8 @@ def generate_asset_preview(session: Session, asset_id: int, force: bool = False)
             thumbnail_file = output_dir / "thumbnail.jpg"
             preview_file = output_dir / "preview.jpg"
             generate_image_preview(download_path, thumbnail_file, preview_file)
-            thumbnail_path = relative_preview_path(asset.asset_uid, "thumbnail.jpg")
-            preview_path = relative_preview_path(asset.asset_uid, "preview.jpg")
+            thumbnail_path = relative_thumbnail_path_for_asset(asset.id)
+            preview_path = relative_preview_path_for_asset(asset.id, "preview.jpg")
         elif asset.type == "audio":
             asset.preview_status = "skipped"
         else:

@@ -15,5 +15,6 @@ data/
 previews/
 data/job-assets/
 job-assets/
+backups/
 *.preview.jpg
 *.thumbnail.jpg

@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import unicodedata
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
@@ -20,8 +21,10 @@ from app.services.ai_providers.openai_provider import (
     sanitize_provider_error,
 )
 from app.services.asset_preview import safe_asset_uid
+from app.services.rclone_service import RcloneError, RcloneService
 
 AI_TEMP_ROOT = Path("/tmp/kurukin-asset-hub-ai")
+MAX_AI_FILENAME_STEM_LENGTH = 90
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ def enrich_asset_with_ai(
         prompt = build_ai_prompt(asset)
         result = call_openai_vision(prompt, inputs.image_paths)
         apply_ai_enrichment(session, asset, result, input_type=inputs.input_type, force=force)
+        rename_asset_file_from_ai(session, asset, result)
         session.commit()
         return asset
     except Exception as exc:
@@ -89,7 +93,22 @@ def enrich_asset_with_ai(
 def enrich_pending_assets(session: Session, limit: int = 20, force: bool = False) -> list[Asset]:
     settings = get_settings()
     bounded_limit = max(1, min(limit, settings.ai_max_assets_per_batch))
-    query = select(Asset.id).order_by(Asset.created_at.asc(), Asset.id.asc()).limit(bounded_limit)
+    query = (
+        select(Asset.id)
+        .where(
+            Asset.status == "active",
+            Asset.source_status == "active",
+            Asset.preview_status == "ready",
+            Asset.type.in_(("image", "video")),
+            or_(Asset.thumbnail_path.is_not(None), Asset.preview_path.is_not(None)),
+        )
+        .order_by(
+            Asset.last_indexed_at.desc().nullslast(),
+            Asset.created_at.desc(),
+            Asset.id.desc(),
+        )
+        .limit(bounded_limit)
+    )
     if not force:
         query = query.where(Asset.ai_enrichment_status == "pending")
     asset_ids = list(session.scalars(query))
@@ -224,6 +243,142 @@ def apply_ai_enrichment(
     asset.auto_keywords_generated_at = now
 
     upsert_ai_keywords(session, asset, result, force=force)
+
+
+def rename_asset_file_from_ai(
+    session: Session,
+    asset: Asset,
+    result: AIAssetEnrichmentResult,
+) -> None:
+    destination_path = ai_descriptive_remote_path(asset, result)
+    if destination_path is None or destination_path == asset.remote_path:
+        return
+    if remote_path_exists(session, asset, destination_path):
+        destination_path = unique_ai_remote_path(asset, destination_path)
+
+    remote_name = asset.rclone_remote or (asset.source.rclone_remote if asset.source else "")
+    rclone = RcloneService()
+    destination_parent = str(PurePosixPath(destination_path).parent)
+    if destination_parent not in {"", "."}:
+        rclone.mkdir_remote(remote_name, destination_parent)
+    try:
+        rclone.rename_remote_file(remote_name, asset.remote_path, destination_path)
+    except RcloneError:
+        recovered_path = find_existing_renamed_remote_path(rclone, remote_name, asset)
+        if recovered_path is None:
+            raise
+        destination_path = recovered_path
+
+    asset.remote_path = destination_path
+    asset.source_path = destination_path
+    asset.filename = PurePosixPath(destination_path).name
+    asset.file_ext = PurePosixPath(destination_path).suffix.lstrip(".").lower() or asset.file_ext
+    session.flush()
+
+
+def ai_descriptive_remote_path(asset: Asset, result: AIAssetEnrichmentResult) -> str | None:
+    stem = descriptive_spanish_stem(result)
+    if not stem:
+        return None
+
+    current_path = PurePosixPath(asset.remote_path)
+    suffix = current_path.suffix or suffix_from_asset(asset)
+    filename = f"{stem}{suffix.lower()}"
+    parent = str(current_path.parent)
+    if parent in {"", "."}:
+        return filename
+    return str(PurePosixPath(parent) / filename)
+
+
+def find_existing_renamed_remote_path(
+    rclone: RcloneService,
+    remote_name: str,
+    asset: Asset,
+) -> str | None:
+    expected_size = asset.source_size_bytes or asset.size_bytes
+    if not expected_size:
+        return None
+    current_path = PurePosixPath(asset.remote_path)
+    parent = str(current_path.parent)
+    search_root = "" if parent in {"", "."} else parent
+    suffix = current_path.suffix.lower()
+    try:
+        entries = rclone.list_json(remote_name, search_root)
+    except RcloneError:
+        return None
+
+    matches: list[str] = []
+    for entry in entries:
+        if entry.get("IsDir"):
+            continue
+        if entry.get("Size") != expected_size:
+            continue
+        name = str(entry.get("Name") or PurePosixPath(str(entry.get("Path") or "")).name)
+        if suffix and PurePosixPath(name).suffix.lower() != suffix:
+            continue
+        relative_path = str(entry.get("Path") or name).strip("/")
+        candidate = str(PurePosixPath(search_root) / relative_path) if search_root else relative_path
+        if candidate != asset.remote_path:
+            matches.append(candidate)
+
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def remote_path_exists(session: Session, asset: Asset, remote_path: str) -> bool:
+    existing_id = session.scalar(
+        select(Asset.id).where(
+            Asset.source_id == asset.source_id,
+            Asset.remote_path == remote_path,
+            Asset.id != asset.id,
+        )
+    )
+    return existing_id is not None
+
+
+def unique_ai_remote_path(asset: Asset, remote_path: str) -> str:
+    path = PurePosixPath(remote_path)
+    suffix = path.suffix
+    stem = path.stem
+    filename = f"{stem}_{asset.id}{suffix}"
+    parent = str(path.parent)
+    if parent in {"", "."}:
+        return filename
+    return str(PurePosixPath(parent) / filename)
+
+
+def descriptive_spanish_stem(result: AIAssetEnrichmentResult) -> str:
+    candidates = [
+        result.title,
+        result.visual_description,
+        result.action_description,
+        result.search_text,
+        result.embedding_text,
+    ]
+    text = next((candidate for candidate in candidates if text_or_none(candidate)), None)
+    if text is None:
+        return ""
+    return slugify_spanish_filename(text)[:MAX_AI_FILENAME_STEM_LENGTH].strip("_")
+
+
+def suffix_from_asset(asset: Asset) -> str:
+    if asset.file_ext:
+        return f".{asset.file_ext.lstrip('.').lower()}"
+    if asset.mime_type == "image/jpeg":
+        return ".jpg"
+    if asset.mime_type == "image/png":
+        return ".png"
+    if asset.mime_type == "video/mp4":
+        return ".mp4"
+    return ""
+
+
+def slugify_spanish_filename(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.lower())
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^a-z0-9]+", "_", ascii_text)
+    return re.sub(r"_+", "_", cleaned).strip("_")
 
 
 def upsert_ai_keywords(

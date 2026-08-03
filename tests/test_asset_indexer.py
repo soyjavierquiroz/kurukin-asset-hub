@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -10,6 +11,7 @@ from app.services.asset_indexer import (
     ALLOWED_EXTENSIONS,
     AssetIndexContext,
     AssetIndexer,
+    build_remote_path,
     infer_asset_type,
     infer_default_usage_scope,
     infer_keywords,
@@ -208,14 +210,17 @@ def test_rclone_lsjson_is_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
         capture_output: bool,
         text: bool,
         timeout: int,
+        env: dict[str, str],
     ) -> subprocess.CompletedProcess[str]:
-        assert command == [
-            "rclone",
+        assert command[0] == "rclone"
+        assert command[-4:] == [
             "lsjson",
             "gdrive_mne:Assets Mujer No Escribas",
             "--recursive",
             "--files-only",
         ]
+        assert "--cache-dir" in command
+        assert "XDG_CACHE_HOME" in env
         assert check is True
         assert capture_output is True
         assert text is True
@@ -227,6 +232,59 @@ def test_rclone_lsjson_is_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
     assert RcloneService().list_json("gdrive_mne", "Assets Mujer No Escribas") == [
         {"Path": "a.mp4", "Name": "a.mp4"}
     ]
+
+
+def test_rclone_uses_isolated_config_and_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    source_config = tmp_path / "source-rclone.conf"
+    source_config.write_text("[gdrive_people_raw_long]\ntype = drive\n", encoding="utf-8")
+    seen: dict[str, str] = {}
+    monkeypatch.setenv("RCLONE_CONFIG", str(source_config))
+
+    def fake_run(
+        command: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        config_index = command.index("--config") + 1
+        cache_index = command.index("--cache-dir") + 1
+        seen["config"] = command[config_index]
+        seen["cache"] = command[cache_index]
+        assert seen["config"] != str(source_config)
+        assert env["RCLONE_CONFIG"] == seen["config"]
+        assert env["XDG_CACHE_HOME"] == seen["cache"]
+        assert command[-3:] == [
+            "copyto",
+            "gdrive_people_raw_long:people/session.mp4",
+            str(tmp_path / "out.mp4"),
+        ]
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    RcloneService().copyto(
+        "gdrive_people_raw_long:",
+        "gdrive_people_raw_long:/people/session.mp4",
+        str(tmp_path / "out.mp4"),
+    )
+
+    assert not Path(seen["config"]).exists()
+    assert source_config.exists()
+
+
+def test_build_remote_path_does_not_duplicate_root() -> None:
+    assert (
+        build_remote_path(
+            "raw_videos",
+            {"Path": "raw_videos/people/session.mp4", "Name": "session.mp4"},
+        )
+        == "raw_videos/people/session.mp4"
+    )
 
 
 def test_rclone_error_message_redacts_secrets() -> None:

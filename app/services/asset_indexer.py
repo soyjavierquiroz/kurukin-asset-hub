@@ -469,7 +469,7 @@ def build_remote_path(root: str, entry: dict[str, Any]) -> str:
         raw_path = infer_filename(entry)
     normalized_entry_path = raw_path.strip("/")
     normalized_root = root.strip("/")
-    if normalized_root:
+    if normalized_root and not normalized_entry_path.startswith(f"{normalized_root}/"):
         return f"{normalized_root}/{normalized_entry_path}"
     return normalized_entry_path
 

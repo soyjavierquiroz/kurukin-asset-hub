@@ -172,6 +172,16 @@ def mock_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
         "collect_asset_images",
         lambda asset: AssetImageInputs([Path(__file__)], "thumbnail"),
     )
+    monkeypatch.setattr(
+        ai_asset_enrichment.RcloneService,
+        "rename_remote_file",
+        lambda self, remote_name, source_path, destination_path, timeout=900: None,
+    )
+    monkeypatch.setattr(
+        ai_asset_enrichment.RcloneService,
+        "mkdir_remote",
+        lambda self, remote_name, remote_path, timeout=300: None,
+    )
 
 
 def test_ai_schema_validates_result() -> None:
@@ -321,6 +331,41 @@ def test_openai_provider_falls_back_from_nvidia_to_openai(monkeypatch: pytest.Mo
     assert "base_url" not in calls[1]["client_kwargs"]
 
 
+def test_openai_provider_uses_provider_specific_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    enable_ai(monkeypatch)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-secret")
+    monkeypatch.setenv("AI_MODEL", "gpt-5.4-mini")
+    get_settings.cache_clear()
+    calls: list[dict[str, object]] = []
+
+    class FakeCompletions:
+        def __init__(self, client_kwargs: dict[str, object]) -> None:
+            self.client_kwargs = client_kwargs
+
+        def create(self, **kwargs: object) -> object:
+            calls.append({"client_kwargs": self.client_kwargs, "kwargs": kwargs})
+            if self.client_kwargs.get("base_url") == openai_provider.NVIDIA_BASE_URL:
+                raise RuntimeError("nvidia timeout")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(valid_ai_payload())),
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            self.chat = SimpleNamespace(completions=FakeCompletions(kwargs))
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    openai_provider.call_openai_vision("prompt", [Path(__file__)])
+
+    assert calls[0]["kwargs"]["model"] == openai_provider.DEFAULT_NVIDIA_MODEL
+    assert calls[1]["kwargs"]["model"] == "gpt-5.4-mini"
+
+
 def test_enrich_asset_skipped_without_preview(monkeypatch: pytest.MonkeyPatch) -> None:
     enable_ai(monkeypatch)
     client, session_factory = make_test_client()
@@ -366,6 +411,54 @@ def test_enrich_asset_applies_metadata_flags_keywords_and_analysis(
         analysis = session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset.id))
         assert analysis is not None
         assert analysis.result_json["visual_description"] == enriched.visual_description
+
+
+def test_enrich_asset_renames_remote_file_from_spanish_ai_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_ai(monkeypatch)
+    mock_inputs(monkeypatch)
+    moves: list[tuple[str, str, str]] = []
+
+    def fake_moveto(
+        self: object,
+        remote_name: str,
+        source_path: str,
+        destination_path: str,
+        timeout: int = 900,
+    ) -> None:
+        moves.append((remote_name, source_path, destination_path))
+
+    monkeypatch.setattr(ai_asset_enrichment.RcloneService, "rename_remote_file", fake_moveto)
+    monkeypatch.setattr(
+        ai_asset_enrichment,
+        "call_openai_vision",
+        lambda prompt, paths: AIAssetEnrichmentResult.model_validate(
+            valid_ai_payload(
+                title="Mujer preparando cafe en cocina luminosa",
+                visual_description="Una mujer prepara cafe en una cocina con luz natural.",
+                search_text="mujer cafe cocina luminosa",
+                embedding_text="Mujer preparando cafe en una cocina luminosa.",
+            )
+        ),
+    )
+    client, session_factory = make_test_client()
+    del client
+
+    with session_factory() as session:
+        asset = seed_asset(session, uid="rename_asset")
+        enriched = enrich_asset_with_ai(session, asset.id)
+
+        assert moves == [
+            (
+                "gdrive_code_x",
+                "assets/rename_asset.jpg",
+                "assets/mujer_preparando_cafe_en_cocina_luminosa.jpg",
+            )
+        ]
+        assert enriched.filename == "mujer_preparando_cafe_en_cocina_luminosa.jpg"
+        assert enriched.remote_path == "assets/mujer_preparando_cafe_en_cocina_luminosa.jpg"
+        assert enriched.source_path == enriched.remote_path
 
 
 def test_ai_keywords_default_to_spanish_when_language_missing(
@@ -535,6 +628,27 @@ def test_cli_dry_run_does_not_call_provider(
 
     assert cli.main() == 0
     assert "processed=1" in capsys.readouterr().out
+
+
+def test_cli_pending_only_selects_assets_with_ready_visual_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, session_factory = make_test_client()
+    del client
+    with session_factory() as session:
+        ready_asset = seed_asset(session, uid="ready_pending")
+        ready_asset.preview_status = "ready"
+        newly_indexed_asset = seed_asset(session, uid="newly_indexed", with_preview=False)
+        newly_indexed_asset.preview_status = "pending"
+        audio_asset = seed_asset(session, uid="audio_pending", asset_type="audio")
+        audio_asset.preview_status = "ready"
+        session.commit()
+
+    import scripts.enrich_assets_ai as cli
+
+    monkeypatch.setattr(cli, "SessionLocal", session_factory)
+
+    assert cli.pending_asset_ids(limit=20) == [ready_asset.id]
 
 
 def test_ui_detail_shows_ai_section() -> None:

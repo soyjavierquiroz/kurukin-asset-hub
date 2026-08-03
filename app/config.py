@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     ai_frame_sample_count: int = Field(default=8, ge=1, le=30, alias="AI_FRAME_SAMPLE_COUNT")
     ai_review_threshold: float = Field(default=0.72, ge=0.0, le=1.0, alias="AI_REVIEW_THRESHOLD")
     ai_max_assets_per_batch: int = Field(default=20, ge=1, le=200, alias="AI_MAX_ASSETS_PER_BATCH")
+    asset_pipeline_enabled: bool = Field(default=True, alias="ASSET_PIPELINE_ENABLED")
+    asset_pipeline_poll_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        alias="ASSET_PIPELINE_POLL_SECONDS",
+    )
+    asset_pipeline_batch_size: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        alias="ASSET_PIPELINE_BATCH_SIZE",
+    )
     long_video_segmentation_enabled: bool = Field(
         default=True,
         alias="LONG_VIDEO_SEGMENTATION_ENABLED",

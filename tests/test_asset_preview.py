@@ -188,6 +188,36 @@ def test_generate_asset_preview_success(
     assert result.preview_path == f"assets/previews/{asset.id}/preview.mp4"
 
 
+def test_generate_image_preview_uses_public_asset_storage(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("PREVIEW_STORAGE_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    asset = make_asset(session, asset_type="image")
+
+    def fake_copyto(self: RcloneService, remote: str, remote_path: str, local_path: str) -> None:
+        Path(local_path).write_bytes(b"image")
+
+    def fake_image_preview(input_path: Path, thumbnail_path: Path, preview_path: Path) -> None:
+        thumbnail_path.write_bytes(b"thumbnail")
+        preview_path.write_bytes(b"preview")
+
+    monkeypatch.setattr(RcloneService, "copyto", fake_copyto)
+    monkeypatch.setattr(asset_preview, "run_ffprobe", lambda path: {"format": {}, "streams": []})
+    monkeypatch.setattr(asset_preview, "generate_image_preview", fake_image_preview)
+
+    result = generate_asset_preview(session, asset.id)
+
+    assert result.preview_status == "ready"
+    assert result.thumbnail_path == f"assets/previews/{asset.id}/thumbnail.jpg"
+    assert result.preview_path == f"assets/previews/{asset.id}/preview.jpg"
+    assert (tmp_path / "assets" / "previews" / str(asset.id) / "thumbnail.jpg").is_file()
+    assert (tmp_path / "assets" / "previews" / str(asset.id) / "preview.jpg").is_file()
+
+
 def test_generate_asset_preview_rclone_failure(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
