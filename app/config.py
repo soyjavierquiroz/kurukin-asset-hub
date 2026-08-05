@@ -86,18 +86,6 @@ class Settings(BaseSettings):
         alias="GOOGLE_DRIVE_ERROR_FOLDER_ID",
     )
     managed_folder_batch_size: int = Field(default=250, ge=1, alias="MANAGED_FOLDER_BATCH_SIZE")
-    asset_pipeline_enabled: bool = Field(default=True, alias="ASSET_PIPELINE_ENABLED")
-    asset_pipeline_poll_seconds: float = Field(
-        default=30.0,
-        ge=1.0,
-        alias="ASSET_PIPELINE_POLL_SECONDS",
-    )
-    asset_pipeline_batch_size: int = Field(
-        default=10,
-        ge=1,
-        le=100,
-        alias="ASSET_PIPELINE_BATCH_SIZE",
-    )
     long_video_segmentation_enabled: bool = Field(
         default=True,
         alias="LONG_VIDEO_SEGMENTATION_ENABLED",
