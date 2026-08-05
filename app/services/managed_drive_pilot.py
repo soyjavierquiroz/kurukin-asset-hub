@@ -36,6 +36,23 @@ from app.services.asset_preview import (
 )
 from app.services.ai_providers.nvidia_provider import NvidiaProviderError, call_nvidia_vision
 from app.services.ai_providers.openai_provider import sanitize_provider_error
+from app.services.managed_drive.naming import (
+    aspect_ratio,
+    clean_semantic_slug,
+    compact_orientation,
+    humanize_slug,
+    near as near,
+    normalize_existing_enum,
+    pilot_orientation,
+    safe_original_filename,
+    sanitized_list,
+    short_id,
+    shot_type_es,
+    slugify,
+    split_text_list,
+    text_or_none,
+    trim_semantic_stem,
+)
 from app.services.people_metadata import (
     PersonVisibility,
     SourcePresentationHint,
@@ -68,7 +85,6 @@ PRIMARY_THEMES = {
 }
 REVIEW_PATH = "90_revision/clasificacion-ambigua"
 PATH_LAYOUT_VERSION = "compact_v2"
-SAFE_STEM_RE = re.compile(r"[^a-z0-9]+")
 SUPPORTED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/tiff", "image/heic"}
 SUPPORTED_VIDEO_MIMES = {"video/mp4", "video/quicktime", "video/x-matroska", "video/webm"}
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -3290,39 +3306,6 @@ def semantic_filename_parts(ai_result: ManagedAIResult) -> list[str]:
     return [fallback] if fallback else ["asset"]
 
 
-def clean_semantic_slug(value: str | None) -> str:
-    slug = slugify(value or "")
-    blocked = {"mp4", "jpg", "jpeg", "png", "mov", "webm", "segment", "video", "imagen", "archivo"}
-    parts = [part for part in slug.split("-") if part and part not in blocked and not part.isdigit()]
-    return "-".join(parts)
-
-
-def trim_semantic_stem(value: str, limit: int) -> str:
-    clean = clean_semantic_slug(value)
-    if len(clean) <= limit:
-        return clean
-    return clean[:limit].rsplit("-", 1)[0].strip("-") or clean[:limit].strip("-")
-
-
-def compact_orientation(value: str) -> str:
-    return {
-        "horizontal-16x9": "16x9",
-        "vertical-9x16": "9x16",
-        "vertical-4x5": "4x5",
-        "cuadrado-1x1": "1x1",
-    }.get(value, value)
-
-
-def shot_type_es(value: str) -> str:
-    return {
-        "closeup": "primer-plano",
-        "medium": "plano-medio",
-        "wide": "plano-abierto",
-        "detail": "detalle",
-        "establishing": "plano-general",
-    }.get(value, value)
-
-
 def usage_policy_for_request(request_data: IngestRequest, ai_result: ManagedAIResult) -> dict[str, Any]:
     if request_data.scope == "generic":
         return {"allowed_default_mix": ["generic"]}
@@ -3356,73 +3339,11 @@ def persist_ai_analysis(session: Session, asset: Asset, ai_result: ManagedAIResu
     )
 
 
-def pilot_orientation(width: int | None, height: int | None) -> str:
-    if not width or not height or width <= 0 or height <= 0:
-        return "otro"
-    ratio = width / height
-    if near(ratio, 16 / 9, 0.08):
-        return "horizontal-16x9"
-    if near(ratio, 9 / 16, 0.08):
-        return "vertical-9x16"
-    if near(ratio, 4 / 5, 0.08):
-        return "vertical-4x5"
-    if near(ratio, 1, 0.08):
-        return "cuadrado-1x1"
-    if ratio >= 2.0:
-        return "panoramico"
-    return "otro"
-
-
-def aspect_ratio(width: int | None, height: int | None) -> float | None:
-    if not width or not height or width <= 0 or height <= 0:
-        return None
-    return round(width / height, 4)
-
-
-def near(value: float, target: float, tolerance: float) -> bool:
-    return abs(value - target) <= tolerance
-
-
-def slugify(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = (
-        normalized.replace("á", "a")
-        .replace("é", "e")
-        .replace("í", "i")
-        .replace("ó", "o")
-        .replace("ú", "u")
-        .replace("ü", "u")
-        .replace("ñ", "n")
-    )
-    cleaned = SAFE_STEM_RE.sub("-", normalized).strip("-")
-    return cleaned[:120].strip("-")
-
-
-def sanitized_list(values: list[str], limit: int) -> list[str]:
-    cleaned = []
-    for value in values[:limit]:
-        item = slugify(str(value))
-        if item:
-            cleaned.append(item)
-    return cleaned
-
-
-def split_text_list(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [item.strip() for item in re.split(r"[,;\n]+", value) if item.strip()][:8]
-
-
 def ai_confidence(ai_result: ManagedAIResult) -> float:
     values = [float(value) for value in ai_result.confidence.values() if isinstance(value, int | float)]
     if not values:
         return 0.0
     return sum(values) / len(values)
-
-
-def short_id(value: str) -> str:
-    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()
-    return digest[:8]
 
 
 def sha256_file(path: Path) -> str:
@@ -3499,24 +3420,6 @@ def pilot_preview_is_valid(path: str | None) -> bool:
     except json.JSONDecodeError:
         return False
     return any(stream.get("codec_type") == "video" for stream in payload.get("streams", []))
-
-
-def safe_original_filename(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_. -]+", "_", Path(name).name).strip(" ._")[:180] or "asset"
-
-
-def text_or_none(value: str | None) -> str | None:
-    if not value:
-        return None
-    return value.strip()[:2000] or None
-
-
-def normalize_existing_enum(value: str) -> str:
-    return value if value else "unknown"
-
-
-def humanize_slug(slug: str) -> str:
-    return " ".join(part.capitalize() for part in slug.split("-") if part) or slug
 
 
 def asset_matches_drive_file(asset: Asset, drive_file: DriveFile) -> bool:
