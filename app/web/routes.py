@@ -1,5 +1,7 @@
 from collections import defaultdict
+from datetime import UTC, datetime
 import math
+import mimetypes
 import secrets
 from pathlib import Path
 from typing import Annotated
@@ -17,6 +19,7 @@ from app.db import get_db_session
 from app.models import (
     Asset,
     AssetAllowedBrand,
+    AssetAIAnalysis,
     AssetKeyword,
     Brand,
     Niche,
@@ -41,6 +44,7 @@ from app.services.asset_preview import (
     safe_asset_uid,
 )
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
+from app.services.managed_drive_pilot import ReviewApproval, approve_review_asset
 from app.services.long_video_segmentation import (
     approve_segmentation,
     delete_original_after_approval,
@@ -100,6 +104,125 @@ def build_query_string(params: dict[str, object]) -> str:
     return urlencode(clean_params)
 
 
+def bool_filter(value: str | bool | None) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return None
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def latest_ai_result(asset: Asset) -> dict[str, object]:
+    analyses = sorted(
+        asset.ai_analyses,
+        key=lambda item: (item.created_at or datetime.min.replace(tzinfo=UTC), item.id or 0),
+        reverse=True,
+    )
+    if not analyses:
+        return {}
+    result = analyses[0].result_json
+    return result if isinstance(result, dict) else {}
+
+
+def latest_ai_results(assets: list[Asset]) -> dict[int, dict[str, object]]:
+    return {asset.id: latest_ai_result(asset) for asset in assets}
+
+
+def latest_ai_value(field: str):
+    return AssetAIAnalysis.result_json[field].as_string()
+
+
+def review_query_base() -> Select[tuple[Asset]]:
+    return select(Asset).where(
+        or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
+    )
+
+
+def apply_asset_filters(
+    query: Select[tuple[Asset]],
+    filters: list[object],
+    *,
+    niche_id: int | None = None,
+) -> Select[tuple[Asset]]:
+    if niche_id:
+        query = query.join(Asset.niches).where(Niche.id == niche_id)
+    if filters:
+        query = query.where(and_(*filters))
+    return query
+
+
+def build_asset_filters(
+    *,
+    q: str | None,
+    brand_id: int | None = None,
+    product_id: int | None = None,
+    type: str | None = None,
+    orientation: str | None = None,
+    status: str | None = None,
+    keyword: str | None = None,
+    usage_scope: str | None = None,
+    scope: str | None = None,
+    auto_select_enabled: bool | None = None,
+    ai_status: str | None = None,
+    needs_review: bool | None = None,
+    primary_theme: str | None = None,
+    contains_people: bool | None = None,
+    visual_presentation: str | None = None,
+    person_visibility: str | None = None,
+) -> list[object]:
+    filters: list[object] = []
+    if clean_text(q):
+        like = f"%{q.strip()}%"
+        filters.append(
+            or_(
+                Asset.asset_uid.ilike(like),
+                Asset.filename.ilike(like),
+                Asset.remote_path.ilike(like),
+                Asset.source_path.ilike(like),
+                Asset.target_name.ilike(like),
+                Asset.title.ilike(like),
+                Asset.description.ilike(like),
+                Asset.primary_theme.ilike(like),
+                Asset.primary_topic.ilike(like),
+                Asset.drive_file_id.ilike(like),
+                Asset.keywords.any(AssetKeyword.keyword.ilike(like)),
+            )
+        )
+    if brand_id:
+        filters.append(Asset.brand_id == brand_id)
+    if product_id:
+        filters.append(Asset.product_id == product_id)
+    if type:
+        filters.append(Asset.type == type)
+    if orientation:
+        filters.append(Asset.orientation == orientation)
+    if status:
+        filters.append(Asset.status == status)
+    if clean_text(keyword):
+        filters.append(Asset.keywords.any(AssetKeyword.keyword.ilike(f"%{keyword.strip()}%")))
+    if usage_scope:
+        filters.append(Asset.usage_scope == usage_scope)
+    if scope:
+        filters.append(Asset.scope == scope)
+    if auto_select_enabled is not None:
+        filters.append(Asset.auto_select_enabled.is_(auto_select_enabled))
+    if ai_status:
+        filters.append(Asset.ai_enrichment_status == ai_status)
+    if needs_review is not None:
+        filters.append(Asset.needs_human_review.is_(needs_review))
+    if primary_theme:
+        filters.append(Asset.primary_theme == primary_theme)
+    if contains_people is not None:
+        filters.append(
+            Asset.ai_analyses.any(AssetAIAnalysis.result_json["contains_people"].as_boolean().is_(contains_people))
+        )
+    if visual_presentation:
+        filters.append(Asset.ai_analyses.any(latest_ai_value("visual_presentation") == visual_presentation))
+    if person_visibility:
+        filters.append(Asset.ai_analyses.any(latest_ai_value("person_visibility") == person_visibility))
+    return filters
+
+
 def get_or_404(session: Session, model: type[Brand] | type[Product] | type[Niche] | type[Source], item_id: int):
     item = session.get(model, item_id)
     if item is None:
@@ -135,49 +258,41 @@ def assets_index(
     type: str | None = None,
     orientation: str | None = None,
     status: str | None = None,
+    scope: str | None = None,
+    primary_theme: str | None = None,
+    contains_people: str | None = None,
+    visual_presentation: str | None = None,
+    person_visibility: str | None = None,
     keyword: str | None = None,
     usage_scope: str | None = None,
     auto_select_enabled: bool | None = None,
     ai_status: str | None = None,
     needs_review: bool | None = None,
+    needs_human_review: bool | None = None,
     page: int = 1,
 ):
     page = max(page, 1)
-    per_page = 25
-    filters = []
-
-    if clean_text(q):
-        like = f"%{q.strip()}%"
-        filters.append(
-            or_(
-                Asset.asset_uid.ilike(like),
-                Asset.filename.ilike(like),
-                Asset.remote_path.ilike(like),
-                Asset.title.ilike(like),
-                Asset.description.ilike(like),
-            )
-        )
-    if brand_id:
-        filters.append(Asset.brand_id == brand_id)
-    if product_id:
-        filters.append(Asset.product_id == product_id)
-    if type:
-        filters.append(Asset.type == type)
-    if orientation:
-        filters.append(Asset.orientation == orientation)
-    if status:
-        filters.append(Asset.status == status)
-    if clean_text(keyword):
-        like = f"%{keyword.strip()}%"
-        filters.append(Asset.keywords.any(AssetKeyword.keyword.ilike(like)))
-    if usage_scope:
-        filters.append(Asset.usage_scope == usage_scope)
-    if auto_select_enabled is not None:
-        filters.append(Asset.auto_select_enabled.is_(auto_select_enabled))
-    if ai_status:
-        filters.append(Asset.ai_enrichment_status == ai_status)
-    if needs_review is not None:
-        filters.append(Asset.needs_human_review.is_(needs_review))
+    per_page = 48
+    review_filter = needs_human_review if needs_human_review is not None else needs_review
+    people_filter = bool_filter(contains_people)
+    filters = build_asset_filters(
+        q=q,
+        brand_id=brand_id,
+        product_id=product_id,
+        type=type,
+        orientation=orientation,
+        status=status,
+        keyword=keyword,
+        usage_scope=usage_scope,
+        scope=scope,
+        auto_select_enabled=auto_select_enabled,
+        ai_status=ai_status,
+        needs_review=review_filter,
+        primary_theme=primary_theme,
+        contains_people=people_filter,
+        visual_presentation=visual_presentation,
+        person_visibility=person_visibility,
+    )
 
     query: Select[tuple[Asset]] = select(Asset).options(
         selectinload(Asset.source),
@@ -185,18 +300,18 @@ def assets_index(
         selectinload(Asset.product),
         selectinload(Asset.niches),
         selectinload(Asset.keywords),
+        selectinload(Asset.ai_analyses),
     )
     count_query = select(func.count(func.distinct(Asset.id))).select_from(Asset)
-
-    if niche_id:
-        query = query.join(Asset.niches).where(Niche.id == niche_id)
-        count_query = count_query.join(Asset.niches).where(Niche.id == niche_id)
-    if filters:
-        query = query.where(and_(*filters))
-        count_query = count_query.where(and_(*filters))
+    query = apply_asset_filters(query, filters, niche_id=niche_id)
+    count_query = apply_asset_filters(count_query, filters, niche_id=niche_id)
 
     total = session.scalar(count_query) or 0
-    needs_review_count = session.scalar(count_query.where(Asset.needs_human_review.is_(True))) or 0
+    needs_review_count = session.scalar(
+        select(func.count()).select_from(Asset).where(
+            or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
+        )
+    ) or 0
     assets = session.scalars(
         query.order_by(Asset.created_at.desc(), Asset.id.desc())
         .offset((page - 1) * per_page)
@@ -221,15 +336,38 @@ def assets_index(
                 "type": type or "",
                 "orientation": orientation or "",
                 "status": status or "",
+                "scope": scope or "",
+                "primary_theme": primary_theme or "",
+                "contains_people": contains_people or "",
+                "visual_presentation": visual_presentation or "",
+                "person_visibility": person_visibility or "",
                 "keyword": keyword or "",
                 "usage_scope": usage_scope or "",
                 "auto_select_enabled": auto_select_enabled,
                 "ai_status": ai_status or "",
-                "needs_review": needs_review,
+                "needs_review": review_filter,
+                "needs_human_review": review_filter,
             },
             "type_values": ASSET_TYPE_VALUES,
             "orientation_values": ORIENTATION_VALUES,
             "status_values": ASSET_STATUS_VALUES,
+            "scope_values": ("generic", "brand", "title"),
+            "primary_theme_values": sorted(
+                value
+                for value in session.scalars(
+                    select(Asset.primary_theme).where(Asset.primary_theme.is_not(None)).distinct()
+                ).all()
+                if value
+            ),
+            "visual_presentation_values": ("masculine", "feminine", "mixed", "unclear", "not_applicable"),
+            "person_visibility_values": (
+                "clear",
+                "partial",
+                "back_view",
+                "silhouette",
+                "occluded",
+                "not_applicable",
+            ),
             "usage_scope_values": USAGE_SCOPE_VALUES,
             "ai_status_values": AI_ENRICHMENT_STATUS_VALUES,
             "pagination_query": build_query_string(
@@ -241,17 +379,23 @@ def assets_index(
                     "type": type,
                     "orientation": orientation,
                     "status": status,
+                    "scope": scope,
+                    "primary_theme": primary_theme,
+                    "contains_people": contains_people,
+                    "visual_presentation": visual_presentation,
+                    "person_visibility": person_visibility,
                     "keyword": keyword,
                     "usage_scope": usage_scope,
                     "auto_select_enabled": auto_select_enabled,
                     "ai_status": ai_status,
-                    "needs_review": needs_review,
+                    "needs_human_review": review_filter,
                 }
             ),
             "page": page,
             "pages": pages,
             "total": total,
             "needs_review_count": needs_review_count,
+            "ai_results": latest_ai_results(assets),
             "long_video_threshold_seconds": get_settings().long_video_threshold_seconds,
             "preview_public_url": preview_public_url,
         },
@@ -270,6 +414,7 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
             selectinload(Asset.niches),
             selectinload(Asset.tags),
             selectinload(Asset.keywords),
+            selectinload(Asset.ai_analyses),
             selectinload(Asset.allowed_brands).selectinload(
                 AssetAllowedBrand.brand,
             ),
@@ -300,6 +445,7 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
             "derived_clips": derived_clips,
             "long_video_threshold_seconds": settings.long_video_threshold_seconds,
             "ai_keywords_by_category": dict(ai_keywords_by_category),
+            "ai_result": latest_ai_result(asset),
             "preview_public_url": preview_public_url,
         },
     )
@@ -376,6 +522,181 @@ async def assets_ai_enrich_bulk(request: Request, _: AdminUser, session: DbSessi
     return redirect_to("/assets")
 
 
+@router.get("/reviews")
+def reviews_index(
+    request: Request,
+    _: AdminUser,
+    session: DbSession,
+    q: str | None = None,
+    status: str | None = None,
+    scope: str | None = None,
+    type: str | None = None,
+    primary_theme: str | None = None,
+    orientation: str | None = None,
+    contains_people: str | None = None,
+    visual_presentation: str | None = None,
+    person_visibility: str | None = None,
+    page: int = 1,
+):
+    page = max(page, 1)
+    per_page = 24
+    filters = build_asset_filters(
+        q=q,
+        type=type,
+        orientation=orientation,
+        status=status,
+        scope=scope,
+        primary_theme=primary_theme,
+        contains_people=bool_filter(contains_people),
+        visual_presentation=visual_presentation,
+        person_visibility=person_visibility,
+    )
+    pending = or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
+    query = (
+        select(Asset)
+        .where(pending)
+        .options(selectinload(Asset.source), selectinload(Asset.keywords), selectinload(Asset.ai_analyses))
+    )
+    count_query = select(func.count()).select_from(Asset).where(pending)
+    if filters:
+        query = query.where(and_(*filters))
+        count_query = count_query.where(and_(*filters))
+    total = session.scalar(count_query) or 0
+    assets = session.scalars(
+        query.order_by(Asset.created_at.asc(), Asset.id.asc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    ).all()
+    pages = max(math.ceil(total / per_page), 1)
+    return templates.TemplateResponse(
+        request,
+        "reviews/index.html",
+        {
+            "page_title": "Revision",
+            "assets": assets,
+            "filters": {
+                "q": q or "",
+                "status": status or "",
+                "scope": scope or "",
+                "type": type or "",
+                "primary_theme": primary_theme or "",
+                "orientation": orientation or "",
+                "contains_people": contains_people or "",
+                "visual_presentation": visual_presentation or "",
+                "person_visibility": person_visibility or "",
+            },
+            "status_values": ASSET_STATUS_VALUES,
+            "scope_values": ("generic", "brand", "title"),
+            "type_values": ASSET_TYPE_VALUES,
+            "orientation_values": ORIENTATION_VALUES,
+            "primary_theme_values": sorted(
+                value
+                for value in session.scalars(
+                    select(Asset.primary_theme).where(Asset.primary_theme.is_not(None)).distinct()
+                ).all()
+                if value
+            ),
+            "visual_presentation_values": ("masculine", "feminine", "mixed", "unclear", "not_applicable"),
+            "person_visibility_values": (
+                "clear",
+                "partial",
+                "back_view",
+                "silhouette",
+                "occluded",
+                "not_applicable",
+            ),
+            "pagination_query": build_query_string(
+                {
+                    "q": q,
+                    "status": status,
+                    "scope": scope,
+                    "type": type,
+                    "primary_theme": primary_theme,
+                    "orientation": orientation,
+                    "contains_people": contains_people,
+                    "visual_presentation": visual_presentation,
+                    "person_visibility": person_visibility,
+                }
+            ),
+            "page": page,
+            "pages": pages,
+            "total": total,
+            "ai_results": latest_ai_results(assets),
+            "preview_public_url": preview_public_url,
+        },
+    )
+
+
+@router.get("/reviews/{asset_id}")
+def reviews_detail(request: Request, asset_id: int, _: AdminUser, session: DbSession):
+    asset = session.scalar(
+        select(Asset)
+        .where(Asset.id == asset_id)
+        .options(selectinload(Asset.keywords), selectinload(Asset.ai_analyses))
+    )
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    if asset.status != "review_required" and not asset.needs_human_review:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
+    return templates.TemplateResponse(
+        request,
+        "reviews/form.html",
+        {
+            "page_title": f"Review {asset.filename}",
+            "asset": asset,
+            "ai_result": latest_ai_result(asset),
+            "preview_public_url": preview_public_url,
+            "visual_presentation_values": ("masculine", "feminine", "mixed", "unclear", "not_applicable"),
+            "person_visibility_values": (
+                "clear",
+                "partial",
+                "back_view",
+                "silhouette",
+                "occluded",
+                "not_applicable",
+            ),
+        },
+    )
+
+
+@router.post("/reviews/{asset_id}")
+def reviews_approve(
+    asset_id: int,
+    admin_user: AdminUser,
+    session: DbSession,
+    visual_presentation: Annotated[str, Form()],
+    visual_presentation_confidence: Annotated[float, Form()],
+    person_visibility: Annotated[str, Form()],
+    people_count: Annotated[int | None, Form()] = None,
+    primary_theme: Annotated[str | None, Form()] = None,
+    primary_topic: Annotated[str | None, Form()] = None,
+    tags: Annotated[str | None, Form()] = None,
+):
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    if not asset.drive_file_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing Drive file ID")
+    try:
+        approve_review_asset(
+            session,
+            ReviewApproval(
+                file_id=asset.drive_file_id,
+                primary_theme=clean_text(primary_theme),
+                primary_topic=clean_text(primary_topic),
+                tags=tuple(split.strip() for split in (tags or "").split(",") if split.strip()),
+                reviewed_by=admin_user,
+                visual_presentation=visual_presentation,
+                visual_presentation_confidence=visual_presentation_confidence,
+                person_visibility=person_visibility,
+                people_count=people_count,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return redirect_to(f"/assets/{asset_id}")
+
+
 def serve_preview_file(asset_uid: str, filename: str) -> FileResponse:
     if filename not in PREVIEW_FILENAMES:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
@@ -393,7 +714,21 @@ def serve_media_path(path: str) -> FileResponse:
     file_path = local_preview_file(path)
     if file_path is None or not file_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
-    return FileResponse(file_path)
+    normalized = path.strip().lstrip("/")
+    settings = get_settings()
+    if normalized.startswith("pilot-previews/"):
+        root = Path(settings.pilot_preview_root).resolve()
+    else:
+        root = Path(settings.preview_storage_dir).resolve()
+    try:
+        resolved = file_path.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found") from exc
+    media_type = mimetypes.guess_type(resolved.name)[0]
+    if resolved.suffix == ".webp":
+        media_type = "image/webp"
+    return FileResponse(resolved, media_type=media_type)
 
 
 @router.get("/media/previews/{asset_uid}/thumbnail.jpg")
@@ -416,6 +751,11 @@ def media_asset_preview(asset_id: int, filename: str, _: AdminUser):
     if filename not in PREVIEW_FILENAMES:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
     return serve_media_path(f"assets/previews/{asset_id}/{filename}")
+
+
+@router.get("/media/{path:path}")
+def media_any_preview(path: str, _: AdminUser):
+    return serve_media_path(path)
 
 
 @router.get("/sources")

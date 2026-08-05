@@ -154,6 +154,10 @@ class ReviewApproval:
     primary_topic: str | None = None
     tags: tuple[str, ...] = ()
     reviewed_by: str | None = None
+    visual_presentation: VisualPresentation | None = None
+    visual_presentation_confidence: float | None = None
+    person_visibility: PersonVisibility | None = None
+    people_count: int | None = None
 
 
 __all__ = [

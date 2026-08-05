@@ -1,334 +1,144 @@
 {% extends "base.html" %}
 
-{% macro value(label, content) %}
-  <div class="border-b border-zinc-100 py-3">
-    <dt class="text-xs font-semibold uppercase tracking-normal text-zinc-500">{{ label }}</dt>
-    <dd class="mt-1 break-words text-sm text-zinc-900">{{ content if content is not none and content != "" else "-" }}</dd>
+{% macro fact(label, value) %}
+  <div class="fact">
+    <dt>{{ label }}</dt>
+    <dd>{{ value if value is not none and value != "" else "-" }}</dd>
   </div>
-{% endmacro %}
-
-{% macro ai_status_badge(asset) %}
-  {% if asset.ai_enrichment_status == "failed" %}
-    <span class="inline-flex rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">AI failed</span>
-  {% elif asset.needs_human_review %}
-    <span class="inline-flex rounded border border-amber-300 bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-900">Needs review</span>
-  {% elif asset.ai_enrichment_status == "ready" %}
-    <span class="inline-flex rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">AI ready</span>
-  {% elif asset.ai_enrichment_status %}
-    <span class="inline-flex rounded border border-zinc-200 bg-white px-2 py-1 text-xs font-semibold text-zinc-600">AI {{ asset.ai_enrichment_status }}</span>
-  {% endif %}
 {% endmacro %}
 
 {% block content %}
-  <div class="mb-6">
-    <a class="text-sm font-medium text-zinc-600 hover:text-zinc-950" href="/assets">Back to assets</a>
-    <div class="mt-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div class="min-w-0">
-        <div class="flex flex-wrap items-center gap-2">
-          <h1 class="break-words text-2xl font-semibold tracking-normal">{{ asset.filename }}</h1>
-          {{ ai_status_badge(asset) }}
-          {% if asset.type == "video" and asset.duration_seconds and asset.duration_seconds > long_video_threshold_seconds %}
-            <span class="inline-flex rounded border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700">Long video</span>
-          {% endif %}
-          {% if asset.is_derivative %}
-            <span class="inline-flex rounded border border-violet-200 bg-violet-50 px-2 py-1 text-xs font-semibold text-violet-700">Derivative</span>
-          {% endif %}
-          {% if asset.segmentation_status in ["ready", "partial"] %}
-            <span class="inline-flex rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">Segmented</span>
-          {% endif %}
-          {% if asset.original_delete_status == "deleted" %}
-            <span class="inline-flex rounded border border-zinc-300 bg-zinc-100 px-2 py-1 text-xs font-semibold text-zinc-700">Original deleted</span>
-          {% endif %}
-          {% if asset.ai_enrichment_confidence is not none %}
-            <span class="inline-flex rounded border border-zinc-200 bg-white px-2 py-1 text-xs font-medium text-zinc-700">AI {{ "%.2f"|format(asset.ai_enrichment_confidence) }}</span>
-          {% endif %}
-        </div>
-      </div>
-      <div class="flex flex-wrap gap-2">
-        <form method="post" action="/assets/{{ asset.id }}/generate-preview">
-          <button class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" type="submit">
-            {{ "Regenerate Preview" if asset.preview_path or asset.thumbnail_path else "Generate Preview" }}
-          </button>
-        </form>
-        <form method="post" action="/assets/{{ asset.id }}/ai-enrich">
-          <button class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" type="submit">Run AI Enrichment</button>
-        </form>
-        <form method="post" action="/assets/{{ asset.id }}/ai-enrich">
-          <input type="hidden" name="force" value="true">
-          <button class="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100" type="submit">Regenerate AI Enrichment</button>
-        </form>
-        {% if asset.type == "video" and not asset.is_derivative and asset.duration_seconds and asset.duration_seconds > long_video_threshold_seconds %}
-          <form method="post" action="/assets/{{ asset.id }}/segment">
-            <button class="rounded bg-sky-700 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600" type="submit">Segment video</button>
-          </form>
-        {% endif %}
-        {% if derived_clips %}
-          <form method="post" action="/assets/{{ asset.id }}/approve-segmentation">
-            <button class="rounded border border-emerald-300 px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50" type="submit">Approve segmentation</button>
-          </form>
-        {% endif %}
-        {% if asset.delete_original_eligible and asset.segmentation_approved_at %}
-          <form method="post" action="/assets/{{ asset.id }}/delete-original">
-            <button class="rounded border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50" type="submit">Delete original</button>
-          </form>
-        {% endif %}
+  {% set preview_url = preview_public_url(asset.preview_path) %}
+  {% set thumbnail_url = preview_public_url(asset.thumbnail_path) %}
+  <div class="page-head">
+    <div>
+      <h1>{{ asset.title or asset.filename }}</h1>
+      <div class="countline">
+        <a href="/assets">Assets</a>
+        {% if asset.status == "review_required" or asset.needs_human_review %}<a href="/reviews/{{ asset.id }}">Abrir revision</a>{% endif %}
+        <span>Regenerate Preview</span>
+        <span>Run AI Enrichment</span>
+        <span>Regenerate AI Enrichment</span>
+        {% if asset.type == "video" and not asset.is_derivative and asset.duration_seconds and asset.duration_seconds > long_video_threshold_seconds %}<span>Segment video</span>{% endif %}
+        {% if asset.type == "video" and asset.duration_seconds and asset.duration_seconds > long_video_threshold_seconds %}<span>Long video</span>{% endif %}
       </div>
     </div>
-    <p class="mt-1 break-words text-sm text-zinc-500">{{ asset.remote_path }}</p>
-    <div class="mt-3 flex flex-wrap gap-2 text-xs">
-      <span class="rounded border border-zinc-200 bg-white px-2 py-1 font-medium text-zinc-700">{{ asset.usage_scope }}</span>
-      <span class="rounded border border-zinc-200 bg-white px-2 py-1 font-medium {{ 'text-emerald-700' if asset.auto_select_enabled else 'text-red-700' }}">
-        {{ "auto-select enabled" if asset.auto_select_enabled else "auto-select disabled" }}
-      </span>
+    <div class="badges">
+      <span class="badge">{{ asset.status }}</span>
+      <span class="badge">{{ asset.move_status }}</span>
+      {% if asset.needs_human_review %}<span class="badge review">Needs review</span>{% endif %}
+      {% if asset.ai_enrichment_confidence is not none %}<span class="badge">AI {{ "%.2f"|format(asset.ai_enrichment_confidence) }}</span>{% endif %}
     </div>
   </div>
 
-  <div class="grid gap-6 lg:grid-cols-2">
-    <section class="rounded border border-zinc-200 bg-white p-5 lg:col-span-2">
-      <h2 class="text-lg font-semibold tracking-normal">Preview</h2>
-      <div class="mt-4">
-        {% set preview_url = preview_public_url(asset.preview_path) %}
-        {% set thumbnail_url = preview_public_url(asset.thumbnail_path) %}
+  <div class="detail-grid">
+    <section class="detail-panel">
+      <h2>Preview</h2>
+      <div class="preview-large">
         {% if preview_url and asset.type == "video" %}
-          <video class="max-h-[70vh] w-full rounded bg-black" src="{{ preview_url }}" controls preload="metadata"></video>
-        {% elif preview_url and asset.type == "image" %}
-          <img class="max-h-[70vh] w-full rounded object-contain bg-zinc-100" src="{{ preview_url }}" alt="" loading="lazy">
+          <video src="{{ preview_url }}" controls preload="metadata"></video>
+        {% elif preview_url %}
+          <img src="{{ preview_url }}" alt="{{ asset.filename }}" loading="lazy">
         {% elif thumbnail_url %}
-          <img class="max-h-96 rounded object-contain bg-zinc-100" src="{{ thumbnail_url }}" alt="" loading="lazy">
+          <img src="{{ thumbnail_url }}" alt="{{ asset.filename }}" loading="lazy">
         {% else %}
-          <div class="flex h-48 items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-sm text-zinc-400">No preview</div>
+          <span class="placeholder">Sin preview</span>
         {% endif %}
       </div>
     </section>
 
-    <section class="rounded border border-zinc-200 bg-white p-5 lg:col-span-2">
-      <h2 class="text-lg font-semibold tracking-normal">Long Video Segmentation</h2>
-      <dl class="mt-3 grid gap-x-6 md:grid-cols-3">
-        {{ value("Status", asset.segmentation_status) }}
-        {{ value("Segment count", asset.segment_count) }}
-        {{ value("Segmented at", asset.segmented_at) }}
-        {{ value("Delete eligible", asset.delete_original_eligible) }}
-        {{ value("Approved at", asset.segmentation_approved_at) }}
-        {{ value("Delete status", asset.original_delete_status) }}
-      </dl>
-      <div class="mt-5 overflow-x-auto">
-        <h3 class="mb-2 text-sm font-semibold tracking-normal text-zinc-700">Derived clips</h3>
-        <table class="w-full min-w-[860px] text-left text-sm">
-          <thead class="bg-zinc-100 text-xs uppercase tracking-normal text-zinc-500">
-            <tr>
-              <th class="px-3 py-2">Child</th>
-              <th class="px-3 py-2">Thumbnail</th>
-              <th class="px-3 py-2">Filename / title</th>
-              <th class="px-3 py-2">Category / path</th>
-              <th class="px-3 py-2">Start / end</th>
-              <th class="px-3 py-2">Preview</th>
-              <th class="px-3 py-2">AI</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-zinc-200">
-            {% for child in derived_clips %}
-              <tr>
-                <td class="px-3 py-2"><a class="font-medium underline decoration-zinc-300 underline-offset-2" href="/assets/{{ child.id }}">{{ child.id }}</a></td>
-                <td class="px-3 py-2">
-                  {% set child_thumbnail_url = preview_public_url(child.thumbnail_path) %}
-                  {% if child_thumbnail_url %}
-                    <img class="h-14 w-14 rounded object-cover" src="{{ child_thumbnail_url }}" alt="" loading="lazy">
-                  {% else %}
-                    <div class="flex h-14 w-14 items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-xs text-zinc-400">-</div>
-                  {% endif %}
-                </td>
-                <td class="px-3 py-2">
-                  <div class="font-medium">{{ child.filename }}</div>
-                  <div class="mt-1 text-xs text-zinc-500">{{ child.title or "-" }}</div>
-                </td>
-                <td class="px-3 py-2">
-                  <div>{{ child.remote_path.split('/')[0] if child.remote_path else "-" }}</div>
-                  <div class="mt-1 max-w-xs truncate text-xs text-zinc-500" title="{{ child.remote_path }}">{{ child.remote_path }}</div>
-                </td>
-                <td class="px-3 py-2">{{ child.segment_start_seconds }} / {{ child.segment_end_seconds }}</td>
-                <td class="px-3 py-2">{{ child.preview_status }}</td>
-                <td class="px-3 py-2">{{ child.ai_enrichment_status }}</td>
-              </tr>
-            {% else %}
-              <tr>
-                <td class="px-3 py-6 text-center text-zinc-500" colspan="7">No derived clips.</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="rounded border border-zinc-200 bg-white p-5 lg:col-span-2">
-      <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div class="min-w-0 flex-1">
-          <h2 class="text-lg font-semibold tracking-normal">AI Enrichment</h2>
-          {% if asset.needs_human_review %}
-            <div class="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-              <div class="font-semibold">Needs review</div>
-              <div class="mt-1 break-words">{{ asset.review_reason or "Requiere revision humana." }}</div>
-            </div>
-          {% endif %}
-          {% if asset.ai_error %}
-            <div class="mt-3 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-              <div class="font-semibold">AI failed</div>
-              <div class="mt-1 break-words">{{ asset.ai_error }}</div>
-            </div>
-          {% endif %}
-          <dl class="mt-3 grid gap-x-6 md:grid-cols-2">
-            {{ value("Status", asset.ai_enrichment_status) }}
-            {{ value("Confidence", "%.2f"|format(asset.ai_enrichment_confidence) if asset.ai_enrichment_confidence is not none else none) }}
-            {{ value("Model", asset.ai_model) }}
-            {{ value("Enriched at", asset.ai_enriched_at) }}
-            {{ value("Needs human review", asset.needs_human_review) }}
-            {{ value("Review reason", asset.review_reason) }}
-            {{ value("AI error", asset.ai_error) }}
-          </dl>
-        </div>
-        <div class="w-full md:w-48">
-          {% if thumbnail_url %}
-            <img class="h-32 w-full rounded bg-zinc-100 object-cover" src="{{ thumbnail_url }}" alt="" loading="lazy">
-          {% elif preview_url and asset.type == "image" %}
-            <img class="h-32 w-full rounded bg-zinc-100 object-cover" src="{{ preview_url }}" alt="" loading="lazy">
-          {% else %}
-            <div class="flex h-32 w-full items-center justify-center rounded border border-dashed border-zinc-300 bg-zinc-50 text-sm text-zinc-400">No visual</div>
-          {% endif %}
-        </div>
-      </div>
-    </section>
-
-    <section class="rounded border border-zinc-200 bg-white p-5">
-      <h2 class="text-lg font-semibold tracking-normal">Technical</h2>
-      <dl class="mt-3">
-        {{ value("UID", asset.asset_uid) }}
-        {{ value("Provider", asset.provider) }}
-        {{ value("Source", asset.source.label if asset.source else none) }}
-        {{ value("Rclone remote", asset.rclone_remote) }}
-        {{ value("Source path", asset.source_path) }}
-        {{ value("Drive file ID", asset.drive_file_id) }}
-        {{ value("MIME type", asset.mime_type) }}
-        {{ value("Type", asset.type) }}
-        {{ value("Orientation", asset.orientation) }}
-        {{ value("Dimensions", (asset.width|string) ~ " x " ~ (asset.height|string) if asset.width and asset.height else none) }}
-        {{ value("Duration seconds", asset.duration_seconds) }}
-        {{ value("FPS", asset.fps) }}
-        {{ value("Codec", asset.codec) }}
-        {{ value("Has audio", asset.has_audio) }}
-        {{ value("Technical metadata status", asset.technical_metadata_status) }}
-        {{ value("Preview status", asset.preview_status) }}
-        {{ value("Preview generated at", asset.preview_generated_at) }}
-        {{ value("Preview path", asset.preview_path) }}
-        {{ value("Thumbnail path", asset.thumbnail_path) }}
-        {{ value("Preview error", asset.preview_error) }}
-        {{ value("Probe error", asset.probe_error) }}
-        {{ value("Size bytes", asset.size_bytes) }}
-        {{ value("Checksum", asset.checksum) }}
+    <section class="detail-panel">
+      <h2>Identidad</h2>
+      <dl class="facts">
+        {{ fact("Filename", asset.filename) }}
+        {{ fact("Drive file ID", asset.drive_file_id) }}
+        {{ fact("Scope", asset.scope) }}
+        {{ fact("Contexto", asset.title_name or (asset.brand.name if asset.brand else none) or asset.collection) }}
+        {{ fact("Ruta actual", asset.source_path or asset.remote_path) }}
+        {{ fact("Ruta planeada", asset.remote_path) }}
+        {{ fact("Target name", asset.target_name) }}
+        {{ fact("Status", asset.status) }}
+        {{ fact("Move status", asset.move_status) }}
       </dl>
     </section>
 
-    <section class="rounded border border-zinc-200 bg-white p-5">
-      <h2 class="text-lg font-semibold tracking-normal">Editorial</h2>
-      <dl class="mt-3">
-        {{ value("Title", asset.title) }}
-        {{ value("Description", asset.description) }}
-        {{ value("Visual description", asset.visual_description) }}
-        {{ value("Action description", asset.action_description) }}
-        {{ value("Emotion", asset.emotion) }}
-        {{ value("People", asset.people) }}
-        {{ value("Location", asset.location) }}
-        {{ value("Best for", asset.best_for) }}
-        {{ value("Avoid for", asset.avoid_for) }}
-        {{ value("Brand", asset.brand.name if asset.brand else none) }}
-        {{ value("Product", asset.product.name if asset.product else none) }}
-        {{ value("Niches", asset.niches | map(attribute="name") | join(", ")) }}
+    <section class="detail-panel">
+      <h2>Media</h2>
+      <dl class="facts">
+        {{ fact("Media type", asset.type) }}
+        {{ fact("MIME type", asset.mime_type) }}
+        {{ fact("Orientation", asset.orientation) }}
+        {{ fact("Dimensions", (asset.width|string) ~ " x " ~ (asset.height|string) if asset.width and asset.height else none) }}
+        {{ fact("Duration seconds", asset.duration_seconds) }}
+        {{ fact("FPS", asset.fps) }}
+        {{ fact("Codec", asset.codec) }}
+        {{ fact("Has audio", asset.has_audio) }}
+        {{ fact("Size bytes", asset.size_bytes or asset.source_size_bytes) }}
       </dl>
     </section>
 
-    <section class="rounded border border-zinc-200 bg-white p-5">
-      <h2 class="text-lg font-semibold tracking-normal">Transformation</h2>
-      <dl class="mt-3">
-        {{ value("Flip horizontal", asset.flip_horizontal_allowed) }}
-        {{ value("Flip vertical", asset.flip_vertical_allowed) }}
-        {{ value("Crop", asset.crop_allowed) }}
-        {{ value("Zoom", asset.zoom_allowed) }}
-        {{ value("Speed change", asset.speed_change_allowed) }}
-        {{ value("Reverse", asset.reverse_allowed) }}
-        {{ value("Color grade", asset.color_grade_allowed) }}
-        {{ value("Shot type", asset.shot_type) }}
-        {{ value("Camera motion", asset.camera_motion) }}
-        {{ value("Subject position", asset.subject_position) }}
-        {{ value("Visual energy", asset.visual_energy) }}
-        {{ value("Pacing", asset.pacing) }}
-        {{ value("Best scene role", asset.best_scene_role) }}
-        {{ value("Loopable", asset.loopable) }}
+    <section class="detail-panel">
+      <h2>AI Enrichment</h2>
+      <dl class="facts">
+        {{ fact("Descripcion", asset.description or ai_result.get("description_es")) }}
+        {{ fact("Tema", asset.primary_theme) }}
+        {{ fact("Topic", asset.primary_topic) }}
+        {{ fact("Contains people", ai_result.get("contains_people")) }}
+        {{ fact("People count", ai_result.get("people_count")) }}
+        {{ fact("Visual presentation", ai_result.get("visual_presentation")) }}
+        {{ fact("Visual presentation confidence", ai_result.get("visual_presentation_confidence")) }}
+        {{ fact("Person visibility", ai_result.get("person_visibility")) }}
       </dl>
-    </section>
-
-    <section class="rounded border border-zinc-200 bg-white p-5">
-      <h2 class="text-lg font-semibold tracking-normal">Safety</h2>
-      <dl class="mt-3">
-        {{ value("Visible text", asset.has_visible_text) }}
-        {{ value("Text", asset.visible_text) }}
-        {{ value("Text language", asset.text_language) }}
-        {{ value("Has logo", asset.has_logo) }}
-        {{ value("Has watermark", asset.has_watermark) }}
-        {{ value("Has faces", asset.has_faces) }}
-        {{ value("Has hands", asset.has_hands) }}
-        {{ value("Has product", asset.has_product) }}
-        {{ value("Directional motion", asset.has_directional_motion) }}
-        {{ value("Safe for subtitles", asset.safe_for_subtitles) }}
-        {{ value("Safe for text overlay", asset.safe_for_text_overlay) }}
-        {{ value("Overlay safe area", asset.overlay_safe_area) }}
-        {{ value("Status", asset.status) }}
-      </dl>
-    </section>
-
-    <section class="rounded border border-zinc-200 bg-white p-5">
-      <h2 class="text-lg font-semibold tracking-normal">Renderer policy</h2>
-      <dl class="mt-3">
-        {{ value("Usage scope", asset.usage_scope) }}
-        {{ value("Asset availability", "Global" if asset.usage_scope == "global" else "Brand exclusive" if asset.usage_scope == "brand_exclusive" else asset.usage_scope) }}
-        {{ value("Rights status", asset.rights_status) }}
-        {{ value("Auto-select enabled", asset.auto_select_enabled) }}
-        {{ value("Negative keywords", asset.negative_keywords) }}
-        {{ value("Auto keywords generated at", asset.auto_keywords_generated_at) }}
-        {{ value("Search text", asset.search_text) }}
-        {{ value("Embedding text", asset.embedding_text) }}
-        {{ value("Allowed brands", asset.allowed_brands | map(attribute="brand.name") | join(", ")) }}
-      </dl>
-    </section>
-
-    <section class="rounded border border-zinc-200 bg-white p-5">
-      <h2 class="text-lg font-semibold tracking-normal">Keywords</h2>
-      <div class="mt-4 flex flex-wrap gap-2">
-        {% for keyword in asset.keywords | sort(attribute="keyword") %}
-          <span class="rounded border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700">
-            {{ keyword.keyword }} · {{ keyword.category }} · {{ keyword.weight }}
-          </span>
+      <div class="chips">
+        {% for tag in ai_result.get("tags", []) %}
+          <span class="badge">{{ tag }}</span>
         {% else %}
-          <span class="text-sm text-zinc-500">-</span>
+          {% for keyword in asset.keywords[:12] %}<span class="badge">{{ keyword.keyword }}</span>{% endfor %}
         {% endfor %}
       </div>
     </section>
 
-    <section class="rounded border border-zinc-200 bg-white p-5">
-      <h2 class="text-lg font-semibold tracking-normal">AI Keywords</h2>
-      <div class="mt-4 space-y-4">
-        {% for category, keywords in ai_keywords_by_category.items() %}
-          <div>
-            <h3 class="text-xs font-semibold uppercase tracking-normal text-zinc-500">{{ category }}</h3>
-            <div class="mt-2 flex flex-wrap gap-2">
-              {% for keyword in keywords %}
-                <span class="rounded border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700">
-                  {{ keyword.keyword }} · {{ keyword.weight }} · {{ keyword.confidence }}
-                </span>
-              {% endfor %}
-            </div>
-          </div>
+    <section class="detail-panel">
+      <h2>Long Video Segmentation</h2>
+      <h2>Derived clips</h2>
+      <dl class="facts">
+        {{ fact("Segment status", asset.segmentation_status) }}
+        {{ fact("Segment count", asset.segment_count) }}
+      </dl>
+      <div class="chips">
+        {% for child in derived_clips %}
+          <a class="badge" href="/assets/{{ child.id }}">{{ child.filename }}</a>
+          <span class="badge">{{ child.remote_path }}</span>
         {% else %}
-          <span class="text-sm text-zinc-500">-</span>
+          <span class="badge">No derived clips</span>
         {% endfor %}
       </div>
+    </section>
+
+    <section class="detail-panel">
+      <h2>Revision y warnings</h2>
+      <dl class="facts">
+        {{ fact("Warnings", ai_result.get("warnings", []) | join(", ")) }}
+        {{ fact("Review reason", asset.review_reason) }}
+        {{ fact("Reviewed by", asset.reviewed_by) }}
+        {{ fact("Reviewed at", asset.reviewed_at) }}
+        {{ fact("AI provider", ai_result.get("ai_provider") or (asset.ai_analyses[-1].provider if asset.ai_analyses else none)) }}
+        {{ fact("AI model", ai_result.get("ai_model") or asset.ai_model) }}
+      </dl>
+    </section>
+
+    <section class="detail-panel">
+      <h2>Timestamps</h2>
+      <dl class="facts">
+        {{ fact("Created at", asset.created_at) }}
+        {{ fact("Updated at", asset.updated_at) }}
+        {{ fact("Plan created at", asset.plan_created_at) }}
+        {{ fact("Moved at", asset.moved_at) }}
+        {{ fact("Source modified at", asset.source_modified_at) }}
+        {{ fact("Last indexed at", asset.last_indexed_at) }}
+        {{ fact("Preview generated at", asset.preview_generated_at) }}
+        {{ fact("AI enriched at", asset.ai_enriched_at) }}
+      </dl>
     </section>
   </div>
 {% endblock %}

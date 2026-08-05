@@ -1,32 +1,10 @@
 {% extends "base.html" %}
 
-{% macro badge(asset) %}
-  {% if asset.status == "review_required" or asset.needs_human_review %}
-    <span class="badge review">review_required</span>
-    <span class="badge review">Revisar</span>
-  {% endif %}
-  {% if asset.status == "ready" %}
-    <span class="badge ready">ready</span>
-  {% endif %}
-  {% if asset.status == "move_planned" or asset.move_status == "planned" %}
-    <span class="badge planned">move_planned</span>
-  {% endif %}
-  {% if asset.status == "failed" or asset.move_status == "move_failed" %}
-    <span class="badge failed">failed</span>
-  {% endif %}
-  {% if asset.status == "moved" or asset.move_status == "moved" %}
-    <span class="badge moved">moved</span>
-  {% endif %}
-{% endmacro %}
-
 {% block content %}
   <div class="page-head">
     <div>
-      <h1>Assets</h1>
-      <div class="countline">
-        <span>{{ total }} assets</span>
-        <span>{{ needs_review_count }} pendientes de revision</span>
-      </div>
+      <h1>Revision</h1>
+      <div class="countline"><span>{{ total }} assets pendientes</span></div>
     </div>
   </div>
 
@@ -83,25 +61,18 @@
         {% for value in person_visibility_values %}<option value="{{ value }}" {% if filters.person_visibility == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
       </select>
     </label>
-    <label>Needs human review
-      <select name="needs_human_review">
-        <option value="" {% if filters.needs_human_review is none %}selected{% endif %}>Todos</option>
-        <option value="true" {% if filters.needs_human_review is sameas true %}selected{% endif %}>Si</option>
-        <option value="false" {% if filters.needs_human_review is sameas false %}selected{% endif %}>No</option>
-      </select>
-    </label>
     <div class="filter-actions">
       <button class="button primary" type="submit">Filtrar</button>
-      <a class="button" href="/assets">Reset</a>
+      <a class="button" href="/reviews">Reset</a>
     </div>
   </form>
 
-  <section class="asset-grid">
+  <section class="review-grid">
     {% for asset in assets %}
       {% set ai = ai_results.get(asset.id, {}) %}
       {% set thumbnail_url = preview_public_url(asset.thumbnail_path) %}
-      <article class="card">
-        <a class="thumb" href="/assets/{{ asset.id }}">
+      <article class="card review-card">
+        <a class="thumb" href="/reviews/{{ asset.id }}">
           {% if thumbnail_url %}
             <img src="{{ thumbnail_url }}" alt="{{ asset.filename }}" loading="lazy">
           {% else %}
@@ -109,29 +80,22 @@
           {% endif %}
         </a>
         <div class="card-body">
-          <a class="asset-title" href="/assets/{{ asset.id }}">{{ asset.title or asset.filename }}</a>
-          {% if asset.review_reason %}<p class="muted">{{ asset.review_reason }}</p>{% endif %}
+          <a class="asset-title" href="/reviews/{{ asset.id }}">{{ asset.title or asset.filename }}</a>
+          <p class="muted">{{ asset.review_reason or "Pendiente de revision humana" }}</p>
           <div class="meta-grid">
-            <div class="meta"><span>Media</span><strong>{{ asset.type }}</strong></div>
-            <div class="meta"><span>Scope</span><strong>{{ asset.scope or "-" }}</strong></div>
             <div class="meta"><span>Status</span><strong>{{ asset.status }}</strong></div>
-            <div class="meta"><span>Orientation</span><strong>{{ asset.orientation }}</strong></div>
+            <div class="meta"><span>Scope</span><strong>{{ asset.scope or "-" }}</strong></div>
             <div class="meta"><span>Theme</span><strong>{{ asset.primary_theme or "-" }}</strong></div>
-            <div class="meta"><span>Topic</span><strong>{{ asset.primary_topic or "-" }}</strong></div>
             <div class="meta"><span>People</span><strong>{{ ai.get("visual_presentation") or "-" }}</strong></div>
-            <div class="meta"><span>Move</span><strong>{{ asset.move_status }}</strong></div>
           </div>
-          <div class="badges">{{ badge(asset) }}</div>
           <div class="badges">
-            <span class="badge">AI {{ asset.ai_enrichment_status }}</span>
-            {% if asset.ai_enrichment_confidence is not none %}
-              <span class="badge">AI {{ "%.2f"|format(asset.ai_enrichment_confidence) }}</span>
-            {% endif %}
+            <span class="badge review">needs review</span>
+            <a class="badge planned" href="/reviews/{{ asset.id }}">formulario</a>
           </div>
         </div>
       </article>
     {% else %}
-      <div class="detail-panel">No assets found.</div>
+      <div class="detail-panel">No hay assets pendientes.</div>
     {% endfor %}
   </section>
 

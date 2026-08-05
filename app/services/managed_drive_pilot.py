@@ -629,7 +629,7 @@ def approve_review_asset(session: Session, approval: ReviewApproval) -> DriveSta
     asset = session.scalar(select(Asset).where(Asset.drive_file_id == approval.file_id))
     if asset is None:
         raise DriveFileNotFoundError(f"asset not found: {approval.file_id}")
-    if asset.status != "review_required":
+    if asset.status != "review_required" and not asset.needs_human_review:
         raise ValueError("asset is not review_required")
     original_scope = asset.scope
     if approval.primary_theme:
@@ -640,6 +640,46 @@ def approve_review_asset(session: Session, approval: ReviewApproval) -> DriveSta
         asset.primary_topic = normalize_primary_topic(approval.primary_topic)
     if approval.tags:
         update_latest_analysis_tags(session, asset, list(approval.tags))
+    latest_analysis = session.scalar(
+        select(AssetAIAnalysis)
+        .where(AssetAIAnalysis.asset_id == asset.id)
+        .order_by(AssetAIAnalysis.created_at.desc(), AssetAIAnalysis.id.desc())
+        .limit(1)
+    )
+    human_result = dict(latest_analysis.result_json) if latest_analysis else {}
+    if approval.visual_presentation is not None:
+        human_result["visual_presentation"] = approval.visual_presentation
+        human_result["contains_people"] = approval.visual_presentation != "not_applicable"
+    if approval.visual_presentation_confidence is not None:
+        human_result["visual_presentation_confidence"] = approval.visual_presentation_confidence
+    if approval.person_visibility is not None:
+        human_result["person_visibility"] = approval.person_visibility
+    if approval.people_count is not None:
+        human_result["people_count"] = approval.people_count
+        human_result["contains_people"] = approval.people_count > 0
+    elif approval.visual_presentation == "not_applicable":
+        human_result["people_count"] = None
+        human_result["contains_people"] = False
+    human_result.update(
+        {
+            "primary_theme": asset.primary_theme,
+            "primary_topic": asset.primary_topic,
+            "tags": list(approval.tags) if approval.tags else human_result.get("tags", []),
+            "human_review_overrides_ai": True,
+            "reviewed_by": approval.reviewed_by,
+        }
+    )
+    session.add(
+        AssetAIAnalysis(
+            asset=asset,
+            model="human-review",
+            provider="human",
+            input_type="manual",
+            prompt_version="human_review_v1",
+            result_json=human_result,
+            confidence=approval.visual_presentation_confidence,
+        )
+    )
     if not asset.primary_theme:
         asset.primary_theme = "otros"
     if not asset.primary_topic:

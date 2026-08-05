@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.assets import router as assets_api_router
 from app.api.health import router as health_router
@@ -23,6 +24,7 @@ def create_app() -> FastAPI:
     app.include_router(raw_videos_api_router, prefix="/api")
     app.include_router(renderer_manifest_api_router)
     app.include_router(web_router)
+    app.mount("/static", StaticFiles(directory="app/static"), name="static")
     return app
 
 

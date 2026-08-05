@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block content %}
+  {% set thumbnail_url = preview_public_url(asset.thumbnail_path) %}
+  <div class="page-head">
+    <div>
+      <h1>{{ asset.title or asset.filename }}</h1>
+      <div class="countline">
+        <a href="/reviews">Revision</a>
+        <a href="/assets/{{ asset.id }}">Detalle</a>
+      </div>
+    </div>
+    <div class="badges">
+      <span class="badge review">{{ asset.status }}</span>
+      <span class="badge">{{ asset.move_status }}</span>
+    </div>
+  </div>
+
+  <div class="detail-grid">
+    <section class="detail-panel">
+      <h2>Preview</h2>
+      <div class="preview-large">
+        {% if thumbnail_url %}
+          <img src="{{ thumbnail_url }}" alt="{{ asset.filename }}" loading="lazy">
+        {% else %}
+          <span class="placeholder">Sin thumbnail</span>
+        {% endif %}
+      </div>
+      <div class="notice">{{ asset.review_reason or "Requiere revision humana." }}</div>
+    </section>
+
+    <section class="detail-panel">
+      <h2>Revision humana</h2>
+      <form class="form-grid" method="post">
+        <label>Visual presentation
+          <select name="visual_presentation" required>
+            {% for value in visual_presentation_values %}
+              <option value="{{ value }}" {% if ai_result.get('visual_presentation', 'not_applicable') == value %}selected{% endif %}>{{ value }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Visual presentation confidence
+          <input type="number" name="visual_presentation_confidence" min="0" max="1" step="0.01" value="{{ ai_result.get('visual_presentation_confidence', 1.0) }}" required>
+        </label>
+        <label>Person visibility
+          <select name="person_visibility" required>
+            {% for value in person_visibility_values %}
+              <option value="{{ value }}" {% if ai_result.get('person_visibility', 'not_applicable') == value %}selected{% endif %}>{{ value }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>People count
+          <input type="number" name="people_count" min="0" step="1" value="{{ ai_result.get('people_count') if ai_result.get('people_count') is not none else '' }}">
+        </label>
+        <label>Primary theme
+          <input name="primary_theme" value="{{ asset.primary_theme or ai_result.get('primary_theme', '') }}">
+        </label>
+        <label>Primary topic
+          <input name="primary_topic" value="{{ asset.primary_topic or ai_result.get('primary_topic', '') }}">
+        </label>
+        <label class="form-wide">Tags
+          <textarea name="tags">{% if ai_result.get('tags') %}{{ ai_result.get('tags') | join(", ") }}{% endif %}</textarea>
+        </label>
+        <div class="filter-actions form-wide">
+          <button class="button primary" type="submit">Aprobar revision</button>
+          <a class="button" href="/reviews">Cancelar</a>
+        </div>
+      </form>
+    </section>
+  </div>
+{% endblock %}
