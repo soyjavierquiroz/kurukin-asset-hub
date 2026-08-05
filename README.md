@@ -365,45 +365,12 @@ El volumen de previews se monta en:
 PREVIEW_STORAGE_DIR=/data/previews
 ```
 
-En Swarm, el volumen usado por el servicio web es `kurukin-asset-hub_previews` y se monta en `/data/previews`. Los paths guardados en DB son relativos, por ejemplo `previews/<asset_uid>/thumbnail.jpg` o `previews/<asset_uid>/preview.mp4`.
+> **Estado actual:** el stack Swarm legacy, su worker automático y los scripts de enriquecimiento por lotes fueron retirados.
+>
+> El flujo soportado para nuevos assets es `asset-hub drive ...` usando `.env.pilot`. Consulta `docs/ASSET_HUB_OPERATIONS.md`.
+>
+> `PREVIEW_STORAGE_DIR` y el código de previews de la UI permanecen temporalmente como componentes reutilizables; no forman parte del pipeline activo de ingestión.
 
-`rclone.conf` no se commitea y no se monta en el servicio web por defecto. Sólo debe montarse en scripts o acciones que necesitan descargar temporalmente desde el remote.
-
-Generar o regenerar un asset desde la UI:
-
-- Entrar a `/assets/{id}` con Basic Auth.
-- Usar `Generate Preview`.
-- Si ya existe preview, el botón muestra `Regenerate Preview`.
-
-También se puede seleccionar assets en `/assets` y ejecutar `Generate previews for selected`.
-
-Ejemplo CLI por asset ID:
-
-```bash
-docker run --rm \
-  --env-file .env \
-  --network kurukin-asset-hub_asset_hub_internal \
-  -v /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro \
-  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
-  -v kurukin-asset-hub_previews:/data/previews \
-  kurukin-asset-hub-web:asset-preview-enrichment \
-  python scripts/enrich_asset_previews.py --asset-id 1
-```
-
-Ejemplo CLI para pendientes:
-
-```bash
-docker run --rm \
-  --env-file .env \
-  --network kurukin-asset-hub_asset_hub_internal \
-  -v /root/.config/rclone/rclone.conf:/config/rclone/rclone.conf:ro \
-  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
-  -v kurukin-asset-hub_previews:/data/previews \
-  kurukin-asset-hub-web:asset-preview-enrichment \
-  python scripts/enrich_asset_previews.py --pending --limit 10
-```
-
-Agregar `--force` para regenerar previews existentes.
 
 ## AI asset enrichment
 
