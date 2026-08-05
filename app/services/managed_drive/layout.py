@@ -6,7 +6,7 @@ from app.services.managed_drive.naming import slugify
 
 if TYPE_CHECKING:
     from app.models import Asset, Brand
-    from app.services.managed_drive_pilot import Classification, IngestRequest
+    from app.services.managed_drive.contracts import Classification, IngestRequest
 
 
 def compact_folder_primary_topic(asset: Asset) -> str:

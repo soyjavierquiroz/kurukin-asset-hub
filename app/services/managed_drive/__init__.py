@@ -1,5 +1,17 @@
 """Internal helpers for managed Drive services."""
 
+from app.services.managed_drive.contracts import (
+    BatchRequest,
+    BatchScope,
+    Classification,
+    DriveFile,
+    IngestRequest,
+    ManagedAIResult,
+    PreflightRequest,
+    PreviewResult,
+    ReviewApproval,
+    TechnicalResult,
+)
 from app.services.managed_drive.naming import (
     aspect_ratio,
     clean_semantic_slug,
@@ -20,18 +32,28 @@ from app.services.managed_drive.naming import (
 
 __all__ = [
     "aspect_ratio",
+    "BatchRequest",
+    "BatchScope",
+    "Classification",
     "clean_semantic_slug",
     "compact_orientation",
+    "DriveFile",
     "humanize_slug",
+    "IngestRequest",
+    "ManagedAIResult",
     "near",
     "normalize_existing_enum",
     "pilot_orientation",
+    "PreflightRequest",
+    "PreviewResult",
+    "ReviewApproval",
     "safe_original_filename",
     "sanitized_list",
     "short_id",
     "shot_type_es",
     "slugify",
     "split_text_list",
+    "TechnicalResult",
     "text_or_none",
     "trim_semantic_stem",
 ]
