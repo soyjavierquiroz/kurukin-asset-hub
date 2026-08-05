@@ -88,6 +88,13 @@ def valid_ai_payload(**overrides: object) -> dict[str, object]:
         "best_for": "quiet explanatory b-roll",
         "avoid_for": "high-energy hooks",
         "negative_keywords": "chaotic, loud",
+        "contains_people": False,
+        "people_count": None,
+        "visual_presentation": "not_applicable",
+        "visual_presentation_confidence": 0.0,
+        "person_visibility": "not_applicable",
+        "search_terms": [],
+        "source_presentation_hint": None,
         "shot_type": "detail",
         "camera_motion": "static",
         "subject_position": "center",
@@ -256,6 +263,128 @@ def test_openai_strict_schema_requires_every_object_property() -> None:
         assert object_schema["additionalProperties"] is False
 
 
+def test_people_metadata_masculine_includes_persona_hombre() -> None:
+    result = AIAssetEnrichmentResult.model_validate(
+        valid_ai_payload(
+            contains_people=True,
+            people_count=1,
+            visual_presentation="masculine",
+            visual_presentation_confidence=0.92,
+            person_visibility="clear",
+            search_terms=[],
+        )
+    )
+
+    assert {"persona", "hombre"}.issubset(result.search_terms)
+
+
+def test_people_metadata_feminine_includes_persona_mujer() -> None:
+    result = AIAssetEnrichmentResult.model_validate(
+        valid_ai_payload(
+            contains_people=True,
+            people_count=1,
+            visual_presentation="feminine",
+            visual_presentation_confidence=0.93,
+            person_visibility="partial",
+            search_terms=[],
+        )
+    )
+
+    assert {"persona", "mujer"}.issubset(result.search_terms)
+
+
+def test_people_metadata_keeps_gendered_terms_when_confident_and_visible() -> None:
+    result = AIAssetEnrichmentResult.model_validate(
+        valid_ai_payload(
+            title_es="Mujer preparando cafe",
+            primary_topic="mujer preparando cafe",
+            contains_people=True,
+            people_count=1,
+            visual_presentation="feminine",
+            visual_presentation_confidence=0.91,
+            person_visibility="clear",
+            search_terms=[],
+        )
+    )
+
+    assert result.title_es == "Mujer preparando cafe"
+    assert result.primary_topic == "mujer preparando cafe"
+    assert {"persona", "mujer"}.issubset(result.search_terms)
+
+
+def test_people_metadata_silhouette_stays_unclear() -> None:
+    result = AIAssetEnrichmentResult.model_validate(
+        valid_ai_payload(
+            title_es="Silueta de persona",
+            contains_people=True,
+            people_count=1,
+            visual_presentation="unclear",
+            visual_presentation_confidence=0.35,
+            person_visibility="silhouette",
+            search_terms=[],
+        )
+    )
+
+    assert result.visual_presentation == "unclear"
+    assert {"persona", "silueta"}.issubset(result.search_terms)
+
+
+def test_people_metadata_back_view_neutralizes_gendered_terms() -> None:
+    result = AIAssetEnrichmentResult.model_validate(
+        valid_ai_payload(
+            title="Hombre caminando de espaldas",
+            title_es="Hombre caminando de espaldas",
+            primary_topic="hombre caminando",
+            contains_people=True,
+            people_count=1,
+            visual_presentation="masculine",
+            visual_presentation_confidence=0.55,
+            person_visibility="back_view",
+            search_terms=[],
+        )
+    )
+
+    assert result.visual_presentation == "unclear"
+    assert result.title_es == "persona caminando de espaldas"
+    assert result.primary_topic == "persona caminando"
+    assert "persona" in result.search_terms
+    assert "hombre" not in result.search_terms
+    assert result.visual_presentation_confidence < 0.8
+
+
+def test_people_metadata_mixed_includes_group_terms() -> None:
+    result = AIAssetEnrichmentResult.model_validate(
+        valid_ai_payload(
+            contains_people=True,
+            people_count=3,
+            visual_presentation="mixed",
+            visual_presentation_confidence=0.88,
+            person_visibility="clear",
+            search_terms=[],
+        )
+    )
+
+    assert {"personas", "hombres", "mujeres", "grupo"}.issubset(result.search_terms)
+
+
+def test_source_name_hint_does_not_override_visual_evidence() -> None:
+    result = AIAssetEnrichmentResult.model_validate(
+        valid_ai_payload(
+            contains_people=True,
+            people_count=1,
+            visual_presentation="feminine",
+            visual_presentation_confidence=0.91,
+            person_visibility="clear",
+            source_presentation_hint="masculine",
+            search_terms=[],
+        )
+    )
+
+    assert result.source_presentation_hint == "masculine"
+    assert result.visual_presentation == "feminine"
+    assert "mujer" in result.search_terms
+
+
 def test_openai_provider_sends_strict_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     enable_ai(monkeypatch)
     captured: dict[str, object] = {}
@@ -295,7 +424,7 @@ def test_openai_provider_sends_strict_schema(monkeypatch: pytest.MonkeyPatch) ->
     assert result.keywords[0].keyword == "Kitchen"
 
 
-def test_openai_provider_falls_back_from_nvidia_to_openai(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openai_provider_does_not_call_nvidia_when_nvidia_key_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     enable_ai(monkeypatch)
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-secret")
     get_settings.cache_clear()
@@ -307,8 +436,6 @@ def test_openai_provider_falls_back_from_nvidia_to_openai(monkeypatch: pytest.Mo
 
         def create(self, **kwargs: object) -> object:
             calls.append({"client_kwargs": self.client_kwargs, "kwargs": kwargs})
-            if self.client_kwargs.get("base_url") == openai_provider.NVIDIA_BASE_URL:
-                raise RuntimeError("nvidia timeout")
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
@@ -326,12 +453,11 @@ def test_openai_provider_falls_back_from_nvidia_to_openai(monkeypatch: pytest.Mo
     result = openai_provider.call_openai_vision("prompt", [Path(__file__)])
 
     assert result.title == "Warm kitchen detail"
-    assert len(calls) == 2
-    assert calls[0]["client_kwargs"]["base_url"] == openai_provider.NVIDIA_BASE_URL
-    assert "base_url" not in calls[1]["client_kwargs"]
+    assert len(calls) == 1
+    assert "base_url" not in calls[0]["client_kwargs"]
 
 
-def test_openai_provider_uses_provider_specific_models(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openai_provider_uses_openai_model_only(monkeypatch: pytest.MonkeyPatch) -> None:
     enable_ai(monkeypatch)
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-secret")
     monkeypatch.setenv("AI_MODEL", "gpt-5.4-mini")
@@ -344,8 +470,6 @@ def test_openai_provider_uses_provider_specific_models(monkeypatch: pytest.Monke
 
         def create(self, **kwargs: object) -> object:
             calls.append({"client_kwargs": self.client_kwargs, "kwargs": kwargs})
-            if self.client_kwargs.get("base_url") == openai_provider.NVIDIA_BASE_URL:
-                raise RuntimeError("nvidia timeout")
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
@@ -362,8 +486,8 @@ def test_openai_provider_uses_provider_specific_models(monkeypatch: pytest.Monke
 
     openai_provider.call_openai_vision("prompt", [Path(__file__)])
 
-    assert calls[0]["kwargs"]["model"] == openai_provider.DEFAULT_NVIDIA_MODEL
-    assert calls[1]["kwargs"]["model"] == "gpt-5.4-mini"
+    assert len(calls) == 1
+    assert calls[0]["kwargs"]["model"] == "gpt-5.4-mini"
 
 
 def test_enrich_asset_skipped_without_preview(monkeypatch: pytest.MonkeyPatch) -> None:

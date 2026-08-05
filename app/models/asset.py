@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -36,12 +37,51 @@ if TYPE_CHECKING:
     from app.models.source import Source
 
 ASSET_TYPE_VALUES = ("video", "image", "audio", "unknown")
-ASSET_STATUS_VALUES = ("active", "inactive", "missing", "archived")
+ASSET_STATUS_VALUES = (
+    "active",
+    "inactive",
+    "missing",
+    "archived",
+    "discovered",
+    "downloading",
+    "technical_analysis",
+    "preview_generation",
+    "ai_analysis",
+    "move_planned",
+    "moving",
+    "moved",
+    "ready",
+    "review_required",
+    "failed",
+)
 SOURCE_STATUS_VALUES = ("active", "missing", "inaccessible", "deleted", "moved", "changed")
 PREVIEW_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
 TECHNICAL_METADATA_STATUS_VALUES = ("pending", "processing", "ready", "failed", "skipped")
 AI_ENRICHMENT_STATUS_VALUES = ("pending", "processing", "ready", "failed", "needs_review", "skipped")
-ORIENTATION_VALUES = ("9:16", "16:9", "square", "unknown")
+ORIENTATION_VALUES = (
+    "9:16",
+    "16:9",
+    "square",
+    "unknown",
+    "horizontal-16x9",
+    "vertical-9x16",
+    "vertical-4x5",
+    "cuadrado-1x1",
+    "panoramico",
+    "otro",
+)
+ASSET_SCOPE_VALUES = ("generic", "brand", "title")
+TITLE_TYPE_VALUES = ("movie", "series")
+ASSET_COLLECTION_VALUES = ("evergreen", "campaign", "ugc", "brand-kit")
+MOVE_STATUS_VALUES = (
+    "not_planned",
+    "planned",
+    "moving",
+    "moved",
+    "verification_required",
+    "rollback_required",
+    "move_failed",
+)
 OVERLAY_SAFE_AREA_VALUES = ("top", "center", "bottom", "left", "right", "full", "unknown")
 SHOT_TYPE_VALUES = ("closeup", "medium", "wide", "detail", "establishing", "unknown")
 CAMERA_MOTION_VALUES = ("static", "handheld", "pan", "tilt", "zoom", "tracking", "drone", "unknown")
@@ -96,6 +136,33 @@ class Asset(TimestampMixin, Base):
         ),
         CheckConstraint(f"orientation in {ORIENTATION_VALUES}", name="ck_assets_orientation"),
         CheckConstraint(
+            f"scope is null or scope in {ASSET_SCOPE_VALUES}",
+            name="ck_assets_scope",
+        ),
+        CheckConstraint(
+            f"title_type is null or title_type in {TITLE_TYPE_VALUES}",
+            name="ck_assets_title_type",
+        ),
+        CheckConstraint(
+            f"collection is null or collection in {ASSET_COLLECTION_VALUES}",
+            name="ck_assets_collection",
+        ),
+        CheckConstraint(
+            f"move_status in {MOVE_STATUS_VALUES}",
+            name="ck_assets_move_status",
+        ),
+        CheckConstraint(
+            """
+            scope is null
+            or (
+                (scope = 'generic' and brand_id is null and title_name is null)
+                or (scope = 'brand' and brand_id is not null and title_name is null)
+                or (scope = 'title' and title_name is not null and title_type is not null)
+            )
+            """,
+            name="ck_assets_scope_owner",
+        ),
+        CheckConstraint(
             f"overlay_safe_area in {OVERLAY_SAFE_AREA_VALUES}",
             name="ck_assets_overlay_safe_area",
         ),
@@ -135,6 +202,10 @@ class Asset(TimestampMixin, Base):
         Index("ix_assets_brand_id", "brand_id"),
         Index("ix_assets_product_id", "product_id"),
         Index("ix_assets_orientation", "orientation"),
+        Index("ix_assets_scope", "scope"),
+        Index("ix_assets_title_slug", "title_slug"),
+        Index("ix_assets_move_status", "move_status"),
+        Index("ix_assets_drive_file_id", "drive_file_id"),
         Index("ix_assets_usage_scope", "usage_scope"),
         Index("ix_assets_auto_select_enabled", "auto_select_enabled"),
         Index("ix_assets_filename", "filename"),
@@ -172,6 +243,42 @@ class Asset(TimestampMixin, Base):
     brand_id: Mapped[int | None] = mapped_column(ForeignKey("brands.id"))
     product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"))
     title: Mapped[str | None] = mapped_column(String(500))
+    scope: Mapped[str | None] = mapped_column(String(32))
+    title_type: Mapped[str | None] = mapped_column(String(32))
+    title_name: Mapped[str | None] = mapped_column(String(500))
+    title_slug: Mapped[str | None] = mapped_column(String(180))
+    season_number: Mapped[int | None] = mapped_column(Integer)
+    episode_number: Mapped[int | None] = mapped_column(Integer)
+    collection: Mapped[str | None] = mapped_column(String(32))
+    generic_compatibility: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    usage_policy: Mapped[dict | None] = mapped_column(JSON)
+    original_parent_id: Mapped[str | None] = mapped_column(String(255))
+    original_name: Mapped[str | None] = mapped_column(String(500))
+    target_parent_id: Mapped[str | None] = mapped_column(String(255))
+    target_name: Mapped[str | None] = mapped_column(String(500))
+    path_layout_version: Mapped[str | None] = mapped_column(String(80))
+    plan_version: Mapped[str | None] = mapped_column(String(80))
+    plan_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    plan_hash: Mapped[str | None] = mapped_column(String(80))
+    move_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="not_planned",
+        server_default=text("'not_planned'"),
+    )
+    moved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    catalog_version: Mapped[str | None] = mapped_column(String(80))
+    primary_theme: Mapped[str | None] = mapped_column(String(120))
+    primary_topic: Mapped[str | None] = mapped_column(String(160))
+    suggested_uses: Mapped[list | None] = mapped_column(JSON)
+    flip_risk_reasons: Mapped[list | None] = mapped_column(JSON)
+    max_safe_zoom: Mapped[float | None] = mapped_column(Float)
+    safe_text_areas: Mapped[list | None] = mapped_column(JSON)
     description: Mapped[str | None] = mapped_column(Text)
     visual_description: Mapped[str | None] = mapped_column(Text)
     action_description: Mapped[str | None] = mapped_column(Text)

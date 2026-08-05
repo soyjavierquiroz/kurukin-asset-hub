@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.db import Base
+from app.models import Asset, Brand, Source
+from app.services.managed_drive_pilot import (
+    ReviewApproval,
+    approve_review_asset,
+    list_drive_status,
+)
+from scripts import asset_hub
+
+
+@pytest.fixture()
+def session() -> Session:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as db_session:
+        yield db_session
+
+
+def test_cli_help_works_from_other_directory(tmp_path: Path) -> None:
+    executable = shutil.which("asset-hub")
+    command = [executable or sys.executable, "--help"] if executable else [sys.executable, "-m", "scripts.asset_hub", "--help"]
+    result = subprocess.run(command, cwd=tmp_path, check=False, capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0
+    assert "drive" in result.stdout
+
+
+def test_batch_dry_run_cli_does_not_apply_or_mutate_drive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_run(_session, request):
+        captured["request"] = request
+        return fake_batch_result(apply=False)
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_drive_batch", fake_run)
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "batch", "--max-total", "50", "--max-per-scope", "25", "--json"])
+
+    assert code == 0
+    assert captured["request"].apply is False
+
+
+def test_batch_apply_cli_does_not_call_ai(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_run(_session, request):
+        captured["request"] = request
+        return fake_batch_result(apply=True, nvidia_requests=0, openai_requests=0)
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_drive_batch", fake_run)
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "batch", "--apply", "--quiet"])
+
+    assert code == 0
+    assert captured["request"].apply is True
+
+
+def test_status_filters_correctly(session: Session) -> None:
+    source = add_source(session)
+    add_asset(session, source, "ready-1", status="ready", scope="generic")
+    add_asset(session, source, "planned-1", status="move_planned", scope="brand")
+    add_asset(session, source, "planned-2", status="move_planned", scope="generic")
+
+    result = list_drive_status(session, status="move_planned", scope="generic", limit=100)
+
+    assert [row.drive_file_id for row in result.rows] == ["planned-2"]
+    assert result.summary["ready"] == 1
+    assert result.summary["planned"] == 2
+
+
+def test_doctor_detects_wrong_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = write_env(tmp_path)
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "current_database_name", lambda _session: "kurukin_asset_hub")
+    patch_green_doctor(monkeypatch, skip={"check_current_database", "check_legacy_not_selected"})
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "doctor", "--quiet"])
+
+    assert code == 1
+
+
+def test_doctor_detects_stale_alembic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = write_env(tmp_path)
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    patch_green_doctor(monkeypatch, skip={"check_alembic_head"})
+    monkeypatch.setattr(asset_hub, "check_alembic_head", lambda _args, _session: asset_hub.check("alembic_head", False))
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "doctor", "--quiet"])
+
+    assert code == 1
+
+
+def test_doctor_does_not_call_ai_without_check_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = write_env(tmp_path)
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    patch_green_doctor(monkeypatch)
+    monkeypatch.setattr(asset_hub, "check_nvidia_model", lambda *_args: pytest.fail("AI check called"))
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "doctor", "--quiet"])
+
+    assert code == 0
+
+
+def test_review_approve_preserves_scope_and_recalculates_compact_v2(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "root")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    source = add_source(session)
+    asset = add_asset(session, source, "review-1", status="review_required", scope="brand")
+    asset.primary_theme = "otros"
+    asset.primary_topic = "revision manual"
+    asset.collection = "evergreen"
+    session.commit()
+    old_hash = asset.plan_hash
+
+    row = approve_review_asset(
+        session,
+        ReviewApproval(file_id="review-1", primary_theme="personas", primary_topic="bienestar yoga"),
+    )
+
+    assert row.scope == "brand"
+    assert row.status == "move_planned"
+    assert row.move_status == "planned"
+    assert row.path_layout_version == "compact_v2"
+    assert row.target_path and row.target_path.startswith("20_marcas/")
+    assert asset.plan_hash != old_hash
+
+
+def test_layout_migrate_is_simulation_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_migrate(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "simulated": kwargs["simulate"],
+                "assets_detected": [],
+                "assets_migrated": 0,
+                "folders_created": 0,
+                "folders_deleted": 0,
+                "drive_mutations": 0,
+                "duplicates": 0,
+            }
+        )
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "drive_client_from_environment", lambda: object())
+    monkeypatch.setattr(asset_hub, "migrate_legacy_layout_assets", fake_migrate)
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "layout", "migrate", "--from", "legacy", "--to", "compact_v2", "--quiet"])
+
+    assert code == 0
+    assert captured["simulate"] is True
+    assert captured["cleanup_empty_folders"] is False
+
+
+def test_delete_empty_folders_requires_apply(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "drive",
+            "layout",
+            "migrate",
+            "--from",
+            "legacy",
+            "--to",
+            "compact_v2",
+            "--delete-empty-folders",
+            "--quiet",
+        ]
+    )
+
+    assert code == 2
+
+
+def test_secrets_never_appear_in_output(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("NVIDIA_API_KEY", "super-secret-key")
+
+    args = SimpleNamespace(quiet=False, json=False)
+    code = asset_hub.fail(args, 2, RuntimeError("bad super-secret-key value"))
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "super-secret-key" not in captured.err
+    assert "[REDACTED]" in captured.err
+
+
+def test_advisory_lock_exit_code_3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = write_env(tmp_path)
+
+    def fake_run(_session, _request):
+        return fake_batch_result(apply=False, lock_acquired=False)
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_drive_batch", fake_run)
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "batch", "--quiet"])
+
+    assert code == 3
+
+
+def test_second_apply_noop_exit_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = write_env(tmp_path)
+
+    def fake_run(_session, _request):
+        return fake_batch_result(apply=True, files_applied=0, already_applied=1)
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_drive_batch", fake_run)
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "batch", "--apply", "--quiet"])
+
+    assert code == 0
+
+
+def sqlite_factory():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+    return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def fake_batch_result(
+    apply: bool,
+    lock_acquired: bool = True,
+    files_applied: int = 0,
+    already_applied: int = 0,
+    nvidia_requests: int = 1,
+    openai_requests: int = 0,
+):
+    counters = SimpleNamespace(
+        files_discovered=0,
+        files_new=0,
+        files_skipped=0,
+        files_analyzed=0 if apply else 1,
+        files_applied=files_applied,
+        files_ready=0,
+        files_sent_to_review=0,
+        files_failed=0,
+        nvidia_requests=nvidia_requests,
+        nvidia_retries=0,
+        openai_requests=openai_requests,
+        drive_mutations_attempted=files_applied if apply else 0,
+        drive_mutations_succeeded=files_applied if apply else 0,
+        duplicates=0,
+        pending_analysis=0,
+        already_applied=already_applied,
+    )
+    data = {
+        "run_mode": "apply" if apply else "dry-run",
+        "started_at": datetime.now(UTC).isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
+        "concurrency": 1,
+        "lock": "acquired" if lock_acquired else "blocked",
+        "duration_seconds": 0,
+        **counters.__dict__,
+        "assets": [],
+    }
+    return SimpleNamespace(lock_acquired=lock_acquired, counters=counters, to_dict=lambda: data)
+
+
+def patch_green_doctor(monkeypatch: pytest.MonkeyPatch, skip: set[str] | None = None) -> None:
+    skip = skip or set()
+    for name in (
+        "check_database_access",
+        "check_current_database",
+        "check_alembic_head",
+        "check_legacy_not_selected",
+        "check_advisory_lock",
+        "check_previews_writable",
+        "check_rclone_remote",
+        "check_oauth_renewable",
+        "check_drive_access",
+        "check_nvidia_key",
+    ):
+        if name not in skip:
+            monkeypatch.setattr(asset_hub, name, lambda _args, _session, name=name: asset_hub.check(name, True))
+
+
+def write_env(tmp_path: Path) -> Path:
+    env_file = tmp_path / ".env.pilot"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=sqlite:///:memory:",
+                "PILOT_DATABASE_URL=sqlite:///:memory:",
+                "GOOGLE_DRIVE_ROOT_FOLDER_ID=root",
+                "GOOGLE_DRIVE_GENERIC_INBOX_FOLDER_ID=generic-inbox",
+                "GOOGLE_DRIVE_BRAND_INBOX_FOLDER_ID=brand-inbox",
+                "GOOGLE_DRIVE_TITLE_INBOX_FOLDER_ID=title-inbox",
+                "RCLONE_REMOTE=fake",
+                "NVIDIA_API_KEY=test-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return env_file
+
+
+def add_source(session: Session) -> Source:
+    source = Source(source_id="managed-drive-pilot-test", provider="google_drive", label="Managed Drive Pilot")
+    session.add(source)
+    session.commit()
+    return source
+
+
+def add_asset(session: Session, source: Source, file_id: str, status: str, scope: str) -> Asset:
+    brand = None
+    if scope == "brand":
+        brand = Brand(slug="grandiosa-mujer", name="Grandiosa Mujer")
+        session.add(brand)
+        session.flush()
+    asset = Asset(
+        asset_uid=f"uid-{file_id}",
+        source=source,
+        provider="google_drive",
+        remote_path=f"90_revision/{scope}/video/lote-0001/{file_id}.mp4",
+        source_path=f"90_revision/{scope}/video/lote-0001/{file_id}.mp4",
+        drive_file_id=file_id,
+        remote_file_id=file_id,
+        filename=f"{file_id}.mp4",
+        original_name=f"{file_id}.mp4",
+        original_parent_id=f"{scope}-inbox",
+        target_name=f"{file_id}.mp4",
+        status=status,
+        move_status="planned" if status in {"move_planned", "review_required"} else "moved",
+        scope=scope,
+        brand=brand,
+        collection="evergreen" if scope == "brand" else None,
+        type="video",
+        mime_type="video/mp4",
+        orientation="horizontal-16x9",
+        primary_theme="personas",
+        primary_topic="bienestar yoga",
+        path_layout_version="legacy" if status == "review_required" else "compact_v2",
+        plan_hash="old-hash",
+    )
+    session.add(asset)
+    session.commit()
+    return asset

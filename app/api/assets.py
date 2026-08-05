@@ -11,8 +11,9 @@ from app.models import Asset, AssetAllowedBrand, Brand, Niche, Product
 from app.models.asset import ORIENTATION_VALUES, USAGE_SCOPE_VALUES
 from app.schemas.asset_selection import AssetSelectionRequest, AssetSelectionResponse
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
+from app.services.asset_preview import preview_public_url
 from app.services.asset_policy import is_asset_eligible_for_search, resolve_asset_search_policy
-from app.services.asset_search import score_asset_for_query, tokenize_query
+from app.services.asset_search import asset_matches_people_query, score_asset_for_query, tokenize_query
 from app.services.asset_selection import select_assets
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -44,6 +45,12 @@ def search_assets(
     niche_slug: str | None = None,
     type: str | None = None,
     orientation: str | None = None,
+    scope: str | None = None,
+    brand: str | None = None,
+    title: str | None = None,
+    primary_theme: str | None = None,
+    primary_topic: str | None = None,
+    asset_status: Annotated[str | None, Query(alias="status")] = None,
     usage_scope: str | None = None,
     include_global_assets: bool = True,
     include_stock_assets: bool = True,
@@ -59,6 +66,11 @@ def search_assets(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid usage_scope: {usage_scope}",
         )
+    if scope and scope not in {"generic", "brand", "title"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid scope: {scope}",
+        )
 
     if product_slug and not brand_slug:
         raise HTTPException(
@@ -67,31 +79,40 @@ def search_assets(
         )
 
     filters = [eligible_base_filter()]
-    brand: Brand | None = None
+    brand_context: Brand | None = None
     product: Product | None = None
 
     if brand_slug:
-        brand = session.scalar(
+        brand_context = session.scalar(
             select(Brand)
             .where(Brand.slug == brand_slug)
             .options(selectinload(Brand.asset_policy))
         )
-        if brand is None:
+        if brand_context is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Brand not found: {brand_slug}",
             )
         filters.append(
             or_(
-                Asset.brand_id == brand.id,
+                Asset.brand_id == brand_context.id,
                 Asset.usage_scope == "global",
-                allowed_brand_exists(brand),
+                allowed_brand_exists(brand_context),
             )
         )
-    if product_slug and brand is not None:
+    if brand and not brand_slug:
+        brand_record = session.scalar(select(Brand).where(Brand.slug == brand))
+        if brand_record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Brand not found: {brand}",
+            )
+        brand_context = brand_record
+        filters.append(Asset.brand_id == brand_record.id)
+    if product_slug and brand_context is not None:
         product = session.scalar(
             select(Product)
-            .where(Product.brand_id == brand.id, Product.slug == product_slug)
+            .where(Product.brand_id == brand_context.id, Product.slug == product_slug)
             .options(selectinload(Product.asset_policy))
         )
         if product is None:
@@ -100,7 +121,7 @@ def search_assets(
                 detail=f"Product not found: {product_slug}",
             )
 
-    if brand is None:
+    if brand_context is None and not brand:
         filters.append(Asset.usage_scope == "global" if include_global_assets else false())
 
     if not include_stock_assets:
@@ -114,6 +135,16 @@ def search_assets(
         filters.append(Asset.orientation == orientation)
     if usage_scope:
         filters.append(Asset.usage_scope == usage_scope)
+    if scope:
+        filters.append(Asset.scope == scope)
+    if title:
+        filters.append(Asset.title_slug == title)
+    if primary_theme:
+        filters.append(Asset.primary_theme == primary_theme)
+    if primary_topic:
+        filters.append(Asset.primary_topic == primary_topic)
+    if asset_status:
+        filters.append(Asset.status == asset_status)
 
     tokens = tokenize_query(q)
     candidate_limit = max(limit * 20, 200)
@@ -126,7 +157,9 @@ def search_assets(
             selectinload(Asset.brand),
             selectinload(Asset.product),
             selectinload(Asset.niches),
+            selectinload(Asset.tags),
             selectinload(Asset.keywords),
+            selectinload(Asset.ai_analyses),
             selectinload(Asset.allowed_brands).selectinload(AssetAllowedBrand.brand),
         )
         .order_by(
@@ -137,17 +170,19 @@ def search_assets(
         )
         .limit(candidate_limit)
     )
-    policy = resolve_asset_search_policy(brand=brand, product=product)
+    policy = resolve_asset_search_policy(brand=brand_context, product=product)
     scored_assets: list[tuple[Asset, float]] = []
     for asset in session.scalars(query).all():
         if not is_asset_eligible_for_search(
             asset=asset,
-            brand=brand,
+            brand=brand_context,
             product=product,
             include_global_assets=include_global_assets,
             include_stock_assets=include_stock_assets,
             policy=policy,
         ):
+            continue
+        if not asset_matches_people_query(asset, tokens):
             continue
         score = score_asset_for_query(asset, tokens)
         if tokens and score <= 0:
@@ -207,7 +242,7 @@ def api_enrich_asset_with_ai(
 
 def eligible_base_filter():
     return and_(
-        Asset.status == "active",
+        Asset.status.in_(("active", "ready")),
         or_(
             Asset.source_status.is_(None),
             Asset.source_status.not_in(("missing", "inaccessible", "deleted")),
@@ -234,9 +269,39 @@ def serialize_asset(asset: Asset, score: float | None = None) -> dict[str, Any]:
         "asset_uid": asset.asset_uid,
         "filename": asset.filename,
         "remote_path": asset.remote_path,
+        "drive_file_id": asset.drive_file_id,
         "source_path": asset.source_path,
         "type": asset.type,
+        "scope": asset.scope,
+        "title": {
+            "type": asset.title_type,
+            "name": asset.title_name,
+            "slug": asset.title_slug,
+            "season": asset.season_number,
+            "episode": asset.episode_number,
+        }
+        if asset.scope == "title"
+        else None,
+        "description": asset.description,
+        "tags": [tag.tag for tag in asset.tags],
+        "suggested_uses": asset.suggested_uses or [],
+        "primary_theme": asset.primary_theme,
+        "primary_topic": asset.primary_topic,
         "orientation": asset.orientation,
+        "width": asset.width,
+        "height": asset.height,
+        "duration": asset.duration_seconds,
+        "can_flip_horizontal": asset.flip_horizontal_allowed,
+        "can_zoom": asset.zoom_allowed,
+        "generic_compatibility": asset.generic_compatibility,
+        "preview_url": preview_public_url(asset.preview_path),
+        "drive_location": {
+            "parent_id": asset.target_parent_id,
+            "name": asset.target_name or asset.filename,
+            "path": asset.remote_path,
+            "move_status": asset.move_status,
+        },
+        "status": asset.status,
         "usage_scope": asset.usage_scope,
         "rights_status": asset.rights_status,
         "auto_select_enabled": asset.auto_select_enabled,

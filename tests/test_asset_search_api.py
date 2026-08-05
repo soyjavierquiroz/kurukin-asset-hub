@@ -10,6 +10,7 @@ from app.main import create_app
 from app.models import (
     Asset,
     AssetAllowedBrand,
+    AssetAIAnalysis,
     AssetKeyword,
     Brand,
     BrandAssetPolicy,
@@ -255,6 +256,34 @@ def asset_uids(response_json: dict[str, object]) -> set[str]:
     assets = response_json["assets"]
     assert isinstance(assets, list)
     return {asset["asset_uid"] for asset in assets}
+
+
+def add_people_analysis(
+    session: Session,
+    asset: Asset,
+    visual_presentation: str,
+    search_terms: list[str],
+    person_visibility: str = "clear",
+    confidence: float = 0.9,
+) -> None:
+    session.add(
+        AssetAIAnalysis(
+            asset=asset,
+            model="test-model",
+            provider="test",
+            input_type="preview",
+            prompt_version="test",
+            result_json={
+                "contains_people": visual_presentation != "not_applicable",
+                "people_count": 2 if visual_presentation == "mixed" else 1,
+                "visual_presentation": visual_presentation,
+                "visual_presentation_confidence": confidence,
+                "person_visibility": person_visibility,
+                "search_terms": search_terms,
+            },
+            confidence=confidence,
+        )
+    )
 
 
 def get_asset_uids(
@@ -512,6 +541,51 @@ def test_search_accented_query_matches_same_assets() -> None:
     assert "asset-mystic" in accented_uids
 
 
+def test_search_hombre_filters_masculine_and_excludes_feminine() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seeded = seed_search_assets(session)
+        add_people_analysis(session, seeded["own"], "masculine", ["persona", "hombre"])
+        add_people_analysis(session, seeded["other_product"], "feminine", ["persona", "mujer"])
+        session.commit()
+
+    uids = get_asset_uids(client, {"brand_slug": "brand_a", "q": "hombre", "limit": "10"})
+
+    assert "asset-own" in uids
+    assert "asset-other-product" not in uids
+
+
+def test_search_mujer_filters_feminine_and_excludes_masculine() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seeded = seed_search_assets(session)
+        add_people_analysis(session, seeded["own"], "masculine", ["persona", "hombre"])
+        add_people_analysis(session, seeded["other_product"], "feminine", ["persona", "mujer"])
+        session.commit()
+
+    uids = get_asset_uids(client, {"brand_slug": "brand_a", "q": "mujer", "limit": "10"})
+
+    assert "asset-other-product" in uids
+    assert "asset-own" not in uids
+
+
+def test_search_persona_returns_all_human_visual_presentations() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seeded = seed_search_assets(session)
+        add_people_analysis(session, seeded["own"], "masculine", ["persona", "hombre"])
+        add_people_analysis(session, seeded["other_product"], "feminine", ["persona", "mujer"])
+        add_people_analysis(session, seeded["keyword"], "mixed", ["personas", "hombres", "mujeres", "grupo"])
+        add_people_analysis(session, seeded["mystic"], "unclear", ["persona", "silueta"], "silhouette", 0.4)
+        add_people_analysis(session, seeded["global_video"], "not_applicable", [])
+        session.commit()
+
+    uids = get_asset_uids(client, {"brand_slug": "brand_a", "q": "persona", "limit": "20"})
+
+    assert {"asset-own", "asset-other-product", "asset-keyword", "asset-mystic"}.issubset(uids)
+    assert "asset-global-video" not in uids
+
+
 def test_search_without_brand_does_not_return_brand_exclusive_assets() -> None:
     client, session_factory = make_test_client()
     with session_factory() as session:
@@ -548,3 +622,68 @@ def test_search_excludes_disabled_and_inactive_assets() -> None:
 
     assert "asset-disabled" not in uids
     assert "asset-inactive" not in uids
+
+
+def test_managed_brand_filter_does_not_mix_brands() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seeded = seed_search_assets(session)
+        brand_a = seeded["brand_a"]
+        assert isinstance(brand_a, Brand)
+        own = seeded["own"]
+        other_brand = seeded["other_brand"]
+        assert isinstance(own, Asset)
+        assert isinstance(other_brand, Asset)
+        own.scope = "brand"
+        other_brand.scope = "brand"
+        session.commit()
+
+    uids = get_asset_uids(client, {"scope": "brand", "brand": brand_a.slug, "limit": "10"})
+
+    assert "asset-own" in uids
+    assert "asset-other-brand" not in uids
+
+
+def test_managed_generic_filter_does_not_return_title_assets() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seeded = seed_search_assets(session)
+        global_video = seeded["global_video"]
+        global_audio = seeded["global_audio"]
+        assert isinstance(global_video, Asset)
+        assert isinstance(global_audio, Asset)
+        global_video.scope = "generic"
+        global_audio.scope = "title"
+        global_audio.title_type = "movie"
+        global_audio.title_name = "Titulo de prueba"
+        global_audio.title_slug = "titulo-de-prueba"
+        session.commit()
+
+    uids = get_asset_uids(client, {"scope": "generic", "limit": "10"})
+
+    assert "asset-global-video" in uids
+    assert "asset-global-audio" not in uids
+
+
+def test_managed_title_filter_does_not_mix_titles() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seeded = seed_search_assets(session)
+        global_video = seeded["global_video"]
+        global_audio = seeded["global_audio"]
+        assert isinstance(global_video, Asset)
+        assert isinstance(global_audio, Asset)
+        global_video.scope = "title"
+        global_video.title_type = "movie"
+        global_video.title_name = "Titulo de prueba"
+        global_video.title_slug = "titulo-de-prueba"
+        global_audio.scope = "title"
+        global_audio.title_type = "movie"
+        global_audio.title_name = "Otro titulo"
+        global_audio.title_slug = "otro-titulo"
+        session.commit()
+
+    uids = get_asset_uids(client, {"scope": "title", "title": "titulo-de-prueba", "limit": "10"})
+
+    assert "asset-global-video" in uids
+    assert "asset-global-audio" not in uids

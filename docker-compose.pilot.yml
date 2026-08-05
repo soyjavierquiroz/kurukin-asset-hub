@@ -1,0 +1,24 @@
+services:
+  pilot-db:
+    image: postgres:16-alpine
+    container_name: kurukin-asset-hub-pilot-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kurukin_asset_hub_pilot}
+      POSTGRES_USER: ${POSTGRES_USER:-asset_hub_pilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-pilot-password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "127.0.0.1:${PILOT_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - kurukin_asset_hub_pilot_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  kurukin_asset_hub_pilot_postgres_data:
+    name: kurukin_asset_hub_pilot_postgres_data

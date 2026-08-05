@@ -29,15 +29,14 @@ def call_openai_vision(
     timeout_seconds: float = 60.0,
 ) -> AIAssetEnrichmentResult:
     settings = get_settings()
-    nvidia_api_key = settings.nvidia_api_key
-    if not nvidia_api_key and not settings.openai_api_key:
-        raise OpenAIProviderError("NVIDIA_API_KEY or OPENAI_API_KEY is not configured")
+    if not settings.openai_api_key:
+        raise OpenAIProviderError("OPENAI_API_KEY is not configured")
     try:
         from openai import OpenAI
     except ImportError as exc:
         raise OpenAIProviderError("openai package is not installed") from exc
 
-    nvidia_model, openai_model = resolve_provider_models(model, settings.ai_model)
+    openai_model = model or settings.ai_model or DEFAULT_OPENAI_MODEL
     content = build_vision_chat_content(prompt, image_paths)
     response_format = {
         "type": "json_schema",
@@ -49,25 +48,6 @@ def call_openai_vision(
     }
 
     try:
-        if nvidia_api_key:
-            try:
-                nvidia_client = OpenAI(
-                    api_key=nvidia_api_key,
-                    base_url=NVIDIA_BASE_URL,
-                    timeout=timeout_seconds,
-                    max_retries=2,
-                )
-                response = nvidia_client.chat.completions.create(
-                    model=nvidia_model,
-                    messages=[{"role": "user", "content": content}],
-                    response_format=response_format,
-                )
-                return AIAssetEnrichmentResult.model_validate_json(extract_chat_output_text(response))
-            except Exception as exc:
-                if not settings.openai_api_key:
-                    raise
-                logger.warning("NVIDIA API failed, falling back to OpenAI: %s", sanitize_provider_error(str(exc)))
-
         openai_client = OpenAI(
             api_key=settings.openai_api_key,
             timeout=timeout_seconds,

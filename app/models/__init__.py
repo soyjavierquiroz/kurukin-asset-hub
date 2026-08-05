@@ -12,6 +12,7 @@ from app.models.brand import Brand
 from app.models.brand_asset_policy import BrandAssetPolicy
 from app.models.collection import Collection
 from app.models.job_asset_bundle import JobAssetBundle, JobAssetBundleItem
+from app.models.managed_drive_folder import ManagedDriveFolder
 from app.models.niche import Niche
 from app.models.product import Product
 from app.models.product_asset_policy import ProductAssetPolicy
@@ -35,6 +36,7 @@ __all__ = [
     "Collection",
     "JobAssetBundle",
     "JobAssetBundleItem",
+    "ManagedDriveFolder",
     "Niche",
     "Product",
     "ProductAssetPolicy",

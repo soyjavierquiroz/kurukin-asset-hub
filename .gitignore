@@ -8,6 +8,7 @@ htmlcov/
 .venv/
 venv/
 .env
+.env.pilot
 .DS_Store
 dist/
 build/
@@ -18,3 +19,5 @@ job-assets/
 backups/
 *.preview.jpg
 *.thumbnail.jpg
+/10_genericos/
+/hombre_trabajando_segment_032.mp4

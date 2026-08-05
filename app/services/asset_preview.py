@@ -389,6 +389,11 @@ def local_preview_file(path: str | None) -> Path | None:
         if len(parts) != 4 or parts[-1] not in PREVIEW_FILENAMES:
             return None
         return Path(get_settings().preview_storage_dir).joinpath(*parts)
+    if normalized.startswith("pilot-previews/"):
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) != 3 or parts[-1] not in {"thumbnail.webp", "preview.webp"}:
+            return None
+        return Path(get_settings().pilot_preview_root).joinpath(*parts[1:])
     return None
 
 

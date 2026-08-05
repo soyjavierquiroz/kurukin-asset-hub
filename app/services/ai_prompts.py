@@ -19,6 +19,12 @@ Objetivo:
 - Determina si es seguro para subtitulos y overlays de texto.
 - Genera keywords estructuradas con category, weight, confidence y language si aplica.
 - Genera best_for, avoid_for, search_text y embedding_text utiles para busqueda semantica.
+- Detecta personas como presentacion visual aparente, no identidad de genero:
+  contains_people, people_count, visual_presentation, visual_presentation_confidence,
+  person_visibility y search_terms.
+- Para el piloto de Drive, completa title_es, description_es, primary_theme, primary_topic,
+  subject, action, context, suggested_uses, can_flip_horizontal, flip_risk_reasons,
+  can_zoom, max_safe_zoom, generic_compatibility y safe_text_areas cuando el schema los pida.
 - No inventes marca, producto, ubicacion, cultura o personas si no hay evidencia visual.
 - No decidas permisos de marca, producto, usage_scope ni rights_status; eso lo hacen las policies.
 - Si hay duda, baja confidence y marca needs_human_review con review_reason claro.
@@ -53,9 +59,25 @@ Valores permitidos:
 - pacing: slow, medium, fast, unknown
 - best_scene_role: hook, intro, explanation, emotional_peak, transition, broll, outro, background, unknown
 - overlay_safe_area: top, center, bottom, left, right, full, unknown
+- visual_presentation: masculine, feminine, mixed, unclear, not_applicable
+- person_visibility: clear, partial, back_view, silhouette, occluded, not_applicable
 - keyword.category: subject, object, action, location, mood, style, color, concept, culture, scene_role, usage, restriction, other
+- primary_theme permitido para organizacion: personas, naturaleza, animales, ciudad-arquitectura,
+  hogar-interiores, oficina-negocios, tecnologia, salud-bienestar, alimentos, transporte,
+  fondos-texturas, abstractos, objetos, otros
 
 Reglas:
+- No decidas si el asset pertenece a generic, brand o title.
+- No inventes nombres de carpetas; usa primary_theme permitido y primary_topic descriptivo breve.
+- primary_topic debe ser semantico y especifico; no uses "video", "imagen", "archivo" u "otros"
+  salvo que el contenido sea realmente imposible de identificar.
+- subject, action y context deben describir lo observado directamente en las imagenes/frames.
+- visual_presentation representa apariencia visual, no identidad de genero.
+- Si visual_presentation=masculine, search_terms debe incluir persona y hombre.
+- Si visual_presentation=feminine, search_terms debe incluir persona y mujer.
+- Si visual_presentation=mixed, search_terms debe incluir personas, hombres, mujeres y grupo.
+- Si visual_presentation=unclear, search_terms debe incluir persona y opcionalmente silueta.
+- Para silhouette, back_view u occluded usa persona o silueta salvo evidencia visual muy clara.
 - search_text debe ser texto compacto para busqueda literal.
 - embedding_text debe ser una descripcion semantica natural.
 - best_for y avoid_for deben describir usos creativos, no permisos legales.

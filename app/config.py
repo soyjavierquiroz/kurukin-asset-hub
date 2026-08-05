@@ -16,10 +16,15 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://asset_hub:change-me@db:5432/kurukin_asset_hub",
         alias="DATABASE_URL",
     )
+    pilot_database_url: str | None = Field(default=None, alias="PILOT_DATABASE_URL")
     admin_username: str = Field(default="admin", alias="ADMIN_USERNAME")
     admin_password: str = Field(default="change-me", alias="ADMIN_PASSWORD")
     asset_hub_api_key: str = Field(default="change-me", alias="ASSET_HUB_API_KEY")
     preview_storage_dir: str = Field(default="/data/previews", alias="PREVIEW_STORAGE_DIR")
+    pilot_preview_root: str = Field(
+        default="/var/lib/kurukin-asset-hub-pilot/previews",
+        alias="PILOT_PREVIEW_ROOT",
+    )
     job_assets_storage_dir: str = Field(
         default="/data/job-assets",
         alias="JOB_ASSETS_STORAGE_DIR",
@@ -30,6 +35,10 @@ class Settings(BaseSettings):
     )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     nvidia_api_key: str | None = Field(default=None, alias="NVIDIA_API_KEY")
+    nvidia_base_url: str = Field(default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL")
+    nvidia_model: str = Field(default="nvidia/nemotron-nano-12b-v2-vl", alias="NVIDIA_MODEL")
+    nvidia_max_tokens: int = Field(default=900, ge=1, alias="NVIDIA_MAX_TOKENS")
+    nvidia_max_concurrency: int = Field(default=1, ge=1, alias="NVIDIA_MAX_CONCURRENCY")
     ai_enrichment_enabled: bool = Field(default=False, alias="AI_ENRICHMENT_ENABLED")
     ai_provider: str = Field(default="openai", alias="AI_PROVIDER")
     ai_model: str | None = Field(default=None, alias="AI_MODEL")
@@ -37,6 +46,46 @@ class Settings(BaseSettings):
     ai_frame_sample_count: int = Field(default=8, ge=1, le=30, alias="AI_FRAME_SAMPLE_COUNT")
     ai_review_threshold: float = Field(default=0.72, ge=0.0, le=1.0, alias="AI_REVIEW_THRESHOLD")
     ai_max_assets_per_batch: int = Field(default=20, ge=1, le=200, alias="AI_MAX_ASSETS_PER_BATCH")
+    google_drive_root_folder_id: str | None = Field(default=None, alias="GOOGLE_DRIVE_ROOT_FOLDER_ID")
+    google_drive_client: str = Field(default="rclone", alias="GOOGLE_DRIVE_CLIENT")
+    google_drive_auth_mode: str = Field(default="adc", alias="GOOGLE_DRIVE_AUTH_MODE")
+    google_drive_access_token: str | None = Field(default=None, alias="GOOGLE_DRIVE_ACCESS_TOKEN")
+    rclone_remote: str | None = Field(default=None, alias="RCLONE_REMOTE")
+    rclone_config: str | None = Field(default=None, alias="RCLONE_CONFIG")
+    google_drive_legacy_folder_ids: str | None = Field(default=None, alias="GOOGLE_DRIVE_LEGACY_FOLDER_IDS")
+    google_drive_generic_inbox_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_GENERIC_INBOX_FOLDER_ID",
+    )
+    google_drive_brand_inbox_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_BRAND_INBOX_FOLDER_ID",
+    )
+    google_drive_title_inbox_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_TITLE_INBOX_FOLDER_ID",
+    )
+    google_drive_generic_library_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_GENERIC_LIBRARY_FOLDER_ID",
+    )
+    google_drive_brand_library_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_BRAND_LIBRARY_FOLDER_ID",
+    )
+    google_drive_title_library_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_TITLE_LIBRARY_FOLDER_ID",
+    )
+    google_drive_review_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_REVIEW_FOLDER_ID",
+    )
+    google_drive_error_folder_id: str | None = Field(
+        default=None,
+        alias="GOOGLE_DRIVE_ERROR_FOLDER_ID",
+    )
+    managed_folder_batch_size: int = Field(default=250, ge=1, alias="MANAGED_FOLDER_BATCH_SIZE")
     asset_pipeline_enabled: bool = Field(default=True, alias="ASSET_PIPELINE_ENABLED")
     asset_pipeline_poll_seconds: float = Field(
         default=30.0,

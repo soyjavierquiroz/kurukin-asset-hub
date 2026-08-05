@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import unicodedata
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -20,7 +20,13 @@ from app.services.ai_providers.openai_provider import (
     call_openai_vision as openai_call_vision,
     sanitize_provider_error,
 )
+from app.services.ai_providers.nvidia_provider import call_nvidia_vision
 from app.services.asset_preview import safe_asset_uid
+from app.services.people_metadata import (
+    gendered_metadata_allowed,
+    neutralize_gendered_tags,
+    source_presentation_hint,
+)
 from app.services.rclone_service import RcloneError, RcloneService
 
 AI_TEMP_ROOT = Path("/tmp/kurukin-asset-hub-ai")
@@ -162,6 +168,8 @@ def collect_asset_images(asset: Asset) -> AssetImageInputs:
 
 def call_openai_vision(prompt: str, image_paths: list[Path]) -> AIAssetEnrichmentResult:
     settings = get_settings()
+    if settings.ai_provider == "nvidia":
+        return call_nvidia_vision(prompt, image_paths, model=settings.nvidia_model)
     return openai_call_vision(prompt, image_paths, model=settings.ai_model or DEFAULT_OPENAI_MODEL)
 
 
@@ -180,6 +188,15 @@ def apply_ai_enrichment(
     review_reason = result.review_reason
     if confidence < settings.ai_review_threshold:
         review_reason = review_reason or "AI confidence below review threshold"
+    result.source_presentation_hint = source_presentation_hint(asset.original_name or asset.filename)
+    if result.contains_people and not gendered_metadata_allowed(
+        result.visual_presentation_confidence,
+        result.person_visibility,
+    ):
+        for keyword in result.keywords:
+            neutralized = neutralize_gendered_tags([keyword.keyword])
+            if neutralized:
+                keyword.keyword = neutralized[0]
 
     session.add(
         AssetAIAnalysis(
@@ -230,7 +247,7 @@ def apply_ai_enrichment(
     asset.color_grade_allowed = result.color_grade_allowed
     asset.loopable = result.loopable
     asset.similarity_group = trunc(result.similarity_group, 160)
-    asset.search_text = result.search_text.strip()
+    asset.search_text = " ".join([result.search_text, *result.search_terms]).strip()
     asset.embedding_text = result.embedding_text.strip()
     asset.ai_enrichment_status = "needs_review" if needs_review else "ready"
     asset.ai_enrichment_confidence = confidence
