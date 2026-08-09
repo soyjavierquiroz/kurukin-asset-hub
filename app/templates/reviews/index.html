@@ -7,6 +7,9 @@
       <div class="countline"><span>{{ total }} assets pendientes</span></div>
     </div>
   </div>
+  {% if completed %}
+    <div class="notice">Revision completada. No quedan assets pendientes.</div>
+  {% endif %}
 
   <form class="filter-panel" method="get">
     <label>Busqueda

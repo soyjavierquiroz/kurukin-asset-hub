@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy import Select, String, and_, cast, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -21,6 +21,7 @@ from app.models import (
     AssetAllowedBrand,
     AssetAIAnalysis,
     AssetKeyword,
+    AssetTag,
     Brand,
     Niche,
     Product,
@@ -31,6 +32,7 @@ from app.models.asset import (
     AI_ENRICHMENT_STATUS_VALUES,
     ASSET_STATUS_VALUES,
     ASSET_TYPE_VALUES,
+    MOVE_STATUS_VALUES,
     ORIENTATION_VALUES,
     USAGE_SCOPE_VALUES,
 )
@@ -132,10 +134,28 @@ def latest_ai_value(field: str):
     return AssetAIAnalysis.result_json[field].as_string()
 
 
+def pending_review_filter():
+    return or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
+
+
 def review_query_base() -> Select[tuple[Asset]]:
-    return select(Asset).where(
-        or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
-    )
+    return select(Asset).where(pending_review_filter())
+
+
+def asset_sort_order(sort: str | None) -> list[object]:
+    match sort:
+        case "oldest":
+            return [Asset.created_at.asc(), Asset.id.asc()]
+        case "filename":
+            return [Asset.filename.asc(), Asset.id.asc()]
+        case "ai_confidence":
+            return [Asset.ai_enrichment_confidence.desc().nullslast(), Asset.created_at.desc(), Asset.id.desc()]
+        case "duration":
+            return [Asset.duration_seconds.desc().nullslast(), Asset.created_at.desc(), Asset.id.desc()]
+        case "recently_reviewed":
+            return [Asset.reviewed_at.desc().nullslast(), Asset.created_at.desc(), Asset.id.desc()]
+        case _:
+            return [Asset.created_at.desc(), Asset.id.desc()]
 
 
 def apply_asset_filters(
@@ -159,6 +179,7 @@ def build_asset_filters(
     type: str | None = None,
     orientation: str | None = None,
     status: str | None = None,
+    move_status: str | None = None,
     keyword: str | None = None,
     usage_scope: str | None = None,
     scope: str | None = None,
@@ -181,11 +202,21 @@ def build_asset_filters(
                 Asset.source_path.ilike(like),
                 Asset.target_name.ilike(like),
                 Asset.title.ilike(like),
+                Asset.title_name.ilike(like),
                 Asset.description.ilike(like),
+                Asset.visual_description.ilike(like),
+                Asset.action_description.ilike(like),
                 Asset.primary_theme.ilike(like),
                 Asset.primary_topic.ilike(like),
+                Asset.search_text.ilike(like),
+                Asset.scope.ilike(like),
+                Asset.people.ilike(like),
                 Asset.drive_file_id.ilike(like),
+                Asset.brand.has(Brand.name.ilike(like)),
+                Asset.product.has(Product.name.ilike(like)),
+                Asset.tags.any(AssetTag.tag.ilike(like)),
                 Asset.keywords.any(AssetKeyword.keyword.ilike(like)),
+                Asset.ai_analyses.any(cast(AssetAIAnalysis.result_json, String).ilike(like)),
             )
         )
     if brand_id:
@@ -198,6 +229,8 @@ def build_asset_filters(
         filters.append(Asset.orientation == orientation)
     if status:
         filters.append(Asset.status == status)
+    if move_status:
+        filters.append(Asset.move_status == move_status)
     if clean_text(keyword):
         filters.append(Asset.keywords.any(AssetKeyword.keyword.ilike(f"%{keyword.strip()}%")))
     if usage_scope:
@@ -256,8 +289,10 @@ def assets_index(
     product_id: int | None = None,
     niche_id: int | None = None,
     type: str | None = None,
+    media_type: str | None = None,
     orientation: str | None = None,
     status: str | None = None,
+    move_status: str | None = None,
     scope: str | None = None,
     primary_theme: str | None = None,
     contains_people: str | None = None,
@@ -269,6 +304,7 @@ def assets_index(
     ai_status: str | None = None,
     needs_review: bool | None = None,
     needs_human_review: bool | None = None,
+    sort: str = "newest",
     page: int = 1,
 ):
     page = max(page, 1)
@@ -279,9 +315,10 @@ def assets_index(
         q=q,
         brand_id=brand_id,
         product_id=product_id,
-        type=type,
+        type=media_type or type,
         orientation=orientation,
         status=status,
+        move_status=move_status,
         keyword=keyword,
         usage_scope=usage_scope,
         scope=scope,
@@ -307,13 +344,12 @@ def assets_index(
     count_query = apply_asset_filters(count_query, filters, niche_id=niche_id)
 
     total = session.scalar(count_query) or 0
+    catalog_total = session.scalar(select(func.count()).select_from(Asset)) or 0
     needs_review_count = session.scalar(
-        select(func.count()).select_from(Asset).where(
-            or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
-        )
+        select(func.count()).select_from(Asset).where(pending_review_filter())
     ) or 0
     assets = session.scalars(
-        query.order_by(Asset.created_at.desc(), Asset.id.desc())
+        query.order_by(*asset_sort_order(sort))
         .offset((page - 1) * per_page)
         .limit(per_page)
     ).all()
@@ -333,9 +369,11 @@ def assets_index(
                 "brand_id": brand_id,
                 "product_id": product_id,
                 "niche_id": niche_id,
-                "type": type or "",
+                "type": media_type or type or "",
+                "media_type": media_type or type or "",
                 "orientation": orientation or "",
                 "status": status or "",
+                "move_status": move_status or "",
                 "scope": scope or "",
                 "primary_theme": primary_theme or "",
                 "contains_people": contains_people or "",
@@ -347,10 +385,12 @@ def assets_index(
                 "ai_status": ai_status or "",
                 "needs_review": review_filter,
                 "needs_human_review": review_filter,
+                "sort": sort,
             },
             "type_values": ASSET_TYPE_VALUES,
             "orientation_values": ORIENTATION_VALUES,
             "status_values": ASSET_STATUS_VALUES,
+            "move_status_values": MOVE_STATUS_VALUES,
             "scope_values": ("generic", "brand", "title"),
             "primary_theme_values": sorted(
                 value
@@ -376,9 +416,10 @@ def assets_index(
                     "brand_id": brand_id,
                     "product_id": product_id,
                     "niche_id": niche_id,
-                    "type": type,
+                    "media_type": media_type or type,
                     "orientation": orientation,
                     "status": status,
+                    "move_status": move_status,
                     "scope": scope,
                     "primary_theme": primary_theme,
                     "contains_people": contains_people,
@@ -389,11 +430,13 @@ def assets_index(
                     "auto_select_enabled": auto_select_enabled,
                     "ai_status": ai_status,
                     "needs_human_review": review_filter,
+                    "sort": sort,
                 }
             ),
             "page": page,
             "pages": pages,
             "total": total,
+            "catalog_total": catalog_total,
             "needs_review_count": needs_review_count,
             "ai_results": latest_ai_results(assets),
             "long_video_threshold_seconds": get_settings().long_video_threshold_seconds,
@@ -537,6 +580,7 @@ def reviews_index(
     visual_presentation: str | None = None,
     person_visibility: str | None = None,
     page: int = 1,
+    completed: bool = False,
 ):
     page = max(page, 1)
     per_page = 24
@@ -551,7 +595,7 @@ def reviews_index(
         visual_presentation=visual_presentation,
         person_visibility=person_visibility,
     )
-    pending = or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
+    pending = pending_review_filter()
     query = (
         select(Asset)
         .where(pending)
@@ -621,6 +665,7 @@ def reviews_index(
             "page": page,
             "pages": pages,
             "total": total,
+            "completed": completed,
             "ai_results": latest_ai_results(assets),
             "preview_public_url": preview_public_url,
         },
@@ -638,12 +683,21 @@ def reviews_detail(request: Request, asset_id: int, _: AdminUser, session: DbSes
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
     if asset.status != "review_required" and not asset.needs_human_review:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
+    pending_count = session.scalar(select(func.count()).select_from(Asset).where(pending_review_filter())) or 0
+    next_pending = session.scalar(
+        select(Asset.id)
+        .where(pending_review_filter(), Asset.id != asset.id)
+        .order_by(Asset.created_at.asc(), Asset.id.asc())
+        .limit(1)
+    )
     return templates.TemplateResponse(
         request,
         "reviews/form.html",
         {
             "page_title": f"Review {asset.filename}",
             "asset": asset,
+            "pending_count": pending_count,
+            "next_pending_id": next_pending,
             "ai_result": latest_ai_result(asset),
             "preview_public_url": preview_public_url,
             "visual_presentation_values": ("masculine", "feminine", "mixed", "unclear", "not_applicable"),
@@ -671,6 +725,7 @@ def reviews_approve(
     primary_theme: Annotated[str | None, Form()] = None,
     primary_topic: Annotated[str | None, Form()] = None,
     tags: Annotated[str | None, Form()] = None,
+    action: Annotated[str, Form()] = "save",
 ):
     asset = session.get(Asset, asset_id)
     if asset is None:
@@ -694,6 +749,16 @@ def reviews_approve(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if action == "save_next":
+        next_asset_id = session.scalar(
+            select(Asset.id)
+            .where(pending_review_filter())
+            .order_by(Asset.created_at.asc(), Asset.id.asc())
+            .limit(1)
+        )
+        if next_asset_id is None:
+            return redirect_to("/reviews?completed=true")
+        return redirect_to(f"/reviews/{next_asset_id}")
     return redirect_to(f"/assets/{asset_id}")
 
 

@@ -8,6 +8,8 @@
       <div class="countline">
         <a href="/reviews">Revision</a>
         <a href="/assets/{{ asset.id }}">Detalle</a>
+        <span>{{ pending_count }} pendientes</span>
+        {% if next_pending_id %}<a href="/reviews/{{ next_pending_id }}">Siguiente</a>{% endif %}
       </div>
     </div>
     <div class="badges">
@@ -62,7 +64,8 @@
           <textarea name="tags">{% if ai_result.get('tags') %}{{ ai_result.get('tags') | join(", ") }}{% endif %}</textarea>
         </label>
         <div class="filter-actions form-wide">
-          <button class="button primary" type="submit">Aprobar revision</button>
+          <button class="button" type="submit" name="action" value="save">Guardar</button>
+          <button class="button primary" type="submit" name="action" value="save_next">Guardar y siguiente</button>
           <a class="button" href="/reviews">Cancelar</a>
         </div>
       </form>

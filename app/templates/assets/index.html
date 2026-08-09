@@ -24,7 +24,7 @@
     <div>
       <h1>Assets</h1>
       <div class="countline">
-        <span>{{ total }} assets</span>
+        <span>{{ total }} de {{ catalog_total }} assets</span>
         <span>{{ needs_review_count }} pendientes de revision</span>
       </div>
     </div>
@@ -40,6 +40,12 @@
         {% for value in status_values %}<option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
       </select>
     </label>
+    <label>Move status
+      <select name="move_status">
+        <option value="">Todos</option>
+        {% for value in move_status_values %}<option value="{{ value }}" {% if filters.move_status == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+      </select>
+    </label>
     <label>Scope
       <select name="scope">
         <option value="">Todos</option>
@@ -47,9 +53,9 @@
       </select>
     </label>
     <label>Media type
-      <select name="type">
+      <select name="media_type">
         <option value="">Todos</option>
-        {% for value in type_values %}<option value="{{ value }}" {% if filters.type == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+        {% for value in type_values %}<option value="{{ value }}" {% if filters.media_type == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
       </select>
     </label>
     <label>Primary theme
@@ -90,9 +96,19 @@
         <option value="false" {% if filters.needs_human_review is sameas false %}selected{% endif %}>No</option>
       </select>
     </label>
+    <label>Sort
+      <select name="sort">
+        <option value="newest" {% if filters.sort == "newest" %}selected{% endif %}>Newest</option>
+        <option value="oldest" {% if filters.sort == "oldest" %}selected{% endif %}>Oldest</option>
+        <option value="filename" {% if filters.sort == "filename" %}selected{% endif %}>Filename</option>
+        <option value="ai_confidence" {% if filters.sort == "ai_confidence" %}selected{% endif %}>AI confidence</option>
+        <option value="duration" {% if filters.sort == "duration" %}selected{% endif %}>Duration</option>
+        <option value="recently_reviewed" {% if filters.sort == "recently_reviewed" %}selected{% endif %}>Recently reviewed</option>
+      </select>
+    </label>
     <div class="filter-actions">
       <button class="button primary" type="submit">Filtrar</button>
-      <a class="button" href="/assets">Reset</a>
+      <a class="button" href="/assets">Limpiar filtros</a>
     </div>
   </form>
 
@@ -131,7 +147,11 @@
         </div>
       </article>
     {% else %}
-      <div class="detail-panel">No assets found.</div>
+      <div class="detail-panel">
+        <h2>No hay coincidencias</h2>
+        <p class="muted">Prueba quitando filtros o buscando por filename, tema, topic, tags o descripcion.</p>
+        <a class="button" href="/assets">Limpiar filtros</a>
+      </div>
     {% endfor %}
   </section>
 

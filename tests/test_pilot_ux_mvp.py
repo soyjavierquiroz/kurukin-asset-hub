@@ -1,5 +1,6 @@
 from base64 import b64encode
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -10,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import get_settings
 from app.db import Base, get_db_session
 from app.main import create_app
-from app.models import Asset, AssetAIAnalysis, Source
+from app.models import Asset, AssetAIAnalysis, AssetTag, Source
 
 
 def auth_header() -> dict[str, str]:
@@ -59,6 +60,7 @@ def seed_assets(session_factory: sessionmaker[Session], count: int = 3) -> list[
                 drive_file_id=f"drive-{index}",
                 original_parent_id="inbox",
                 filename=f"asset-{index}.mp4",
+                title=f"Asset piloto {index}",
                 type="video" if index != 2 else "image",
                 status=status,
                 scope="generic",
@@ -66,12 +68,17 @@ def seed_assets(session_factory: sessionmaker[Session], count: int = 3) -> list[
                 orientation="9:16" if index != 1 else "16:9",
                 primary_theme="personas" if index == 0 else "naturaleza",
                 primary_topic="yoga" if index == 0 else "bosque",
+                description="descripcion rio azul" if index == 1 else "clip generico",
+                search_text=f"asset piloto buscable {index}",
+                duration_seconds=float(index),
                 thumbnail_path=f"pilot-previews/{index + 1}/thumbnail.webp",
                 needs_human_review=index == 0,
                 review_reason="classification_ambiguous" if index == 0 else None,
+                reviewed_at=datetime.now(UTC) - timedelta(days=index) if index > 0 else None,
             )
             session.add(asset)
             session.flush()
+            session.add(AssetTag(asset=asset, tag=f"selva-tag-{index}"))
             session.add(
                 AssetAIAnalysis(
                     asset=asset,
@@ -118,6 +125,93 @@ def test_assets_gallery_filters_and_pagination(tmp_path: Path, monkeypatch) -> N
     assert "Pagina 2 de 2" in response.text
 
 
+def test_assets_search_by_filename(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    response = client.get("/assets?q=asset-2", headers=auth_header())
+
+    assert response.status_code == 200
+    assert "asset-2.mp4" in response.text
+    assert "asset-0.mp4" not in response.text
+
+
+def test_assets_search_by_description_topic_and_tags(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    description = client.get("/assets?q=rio azul", headers=auth_header())
+    topic = client.get("/assets?q=yoga", headers=auth_header())
+    tag = client.get("/assets?q=selva-tag-2", headers=auth_header())
+
+    assert description.status_code == 200
+    assert "asset-1.mp4" in description.text
+    assert topic.status_code == 200
+    assert "asset-0.mp4" in topic.text
+    assert tag.status_code == 200
+    assert "asset-2.mp4" in tag.text
+
+
+def test_assets_combined_filters(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=4)
+    client = TestClient(app)
+
+    response = client.get(
+        "/assets?status=ready&media_type=image&orientation=9:16&move_status=not_planned",
+        headers=auth_header(),
+    )
+
+    assert response.status_code == 200
+    assert "asset-2.mp4" in response.text
+    assert "asset-1.mp4" not in response.text
+
+
+def test_assets_sort_options(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    response = client.get("/assets?sort=duration", headers=auth_header())
+
+    assert response.status_code == 200
+    assert response.text.index("asset-2.mp4") < response.text.index("asset-1.mp4")
+
+
+def test_assets_pagination_preserves_parameters(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=55)
+    client = TestClient(app)
+
+    response = client.get("/assets?q=asset&media_type=video&sort=filename", headers=auth_header())
+
+    assert response.status_code == 200
+    assert "q=asset" in response.text
+    assert "media_type=video" in response.text
+    assert "sort=filename" in response.text
+    assert "page=2" in response.text
+
+
+def test_assets_empty_result_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    response = client.get("/assets?q=no-existe", headers=auth_header())
+
+    assert response.status_code == 200
+    assert "No hay coincidencias" in response.text
+    assert "0 de 3 assets" in response.text
+
+
 def test_asset_detail_shows_pilot_fields(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
     app, session_factory = make_test_app(tmp_path)
@@ -148,6 +242,66 @@ def test_reviews_queue_and_form(tmp_path: Path, monkeypatch) -> None:
     assert form.status_code == 200
     assert "Revision humana" in form.text
     assert "visual_presentation" in form.text
+    assert "Guardar y siguiente" in form.text
+
+
+def test_review_save_and_next_redirects_to_next_pending(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    ids = seed_assets(session_factory, count=3)
+    with session_factory() as session:
+        second = session.get(Asset, ids[1])
+        assert second is not None
+        second.status = "review_required"
+        second.needs_human_review = True
+        second.review_reason = "manual_check"
+        session.commit()
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{ids[0]}",
+        headers=auth_header(),
+        data={
+            "visual_presentation": "feminine",
+            "visual_presentation_confidence": "0.98",
+            "person_visibility": "clear",
+            "people_count": "1",
+            "primary_theme": "personas",
+            "primary_topic": "yoga humano",
+            "tags": "persona, yoga, aprobado",
+            "action": "save_next",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/reviews/{ids[1]}"
+
+
+def test_review_save_and_next_completes_when_none_pending(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory, count=1)[0]
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}",
+        headers=auth_header(),
+        data={
+            "visual_presentation": "feminine",
+            "visual_presentation_confidence": "0.98",
+            "person_visibility": "clear",
+            "people_count": "1",
+            "primary_theme": "personas",
+            "primary_topic": "yoga humano",
+            "tags": "persona, yoga, aprobado",
+            "action": "save_next",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/reviews?completed=true"
 
 
 def test_pilot_preview_serving_and_path_traversal(tmp_path: Path, monkeypatch) -> None:
@@ -228,6 +382,22 @@ def test_web_requests_do_not_call_drive_or_ai(tmp_path: Path, monkeypatch) -> No
     assert client.get(f"/assets/{asset_id}", headers=auth_header()).status_code == 200
     assert client.get("/reviews", headers=auth_header()).status_code == 200
     assert client.get(f"/reviews/{asset_id}", headers=auth_header()).status_code == 200
+    response = client.post(
+        f"/reviews/{asset_id}",
+        headers=auth_header(),
+        data={
+            "visual_presentation": "feminine",
+            "visual_presentation_confidence": "0.98",
+            "person_visibility": "clear",
+            "people_count": "1",
+            "primary_theme": "personas",
+            "primary_topic": "yoga humano",
+            "tags": "persona, yoga, aprobado",
+            "action": "save_next",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
 
 
 def test_web_uses_configured_pilot_database_url(tmp_path: Path, monkeypatch) -> None:
