@@ -69,6 +69,16 @@
           <a class="button" href="/reviews">Cancelar</a>
         </div>
       </form>
+      <form
+        class="filter-actions form-wide"
+        method="post"
+        action="/reviews/{{ asset.id }}/discard"
+        data-discard-filename="{{ asset.filename }}"
+        onsubmit="return confirm('¿Descartar este asset?\\n' + this.dataset.discardFilename + '\\n\\nSe eliminará del Asset Hub y el archivo será enviado a la papelera de Google Drive.');"
+      >
+        <button class="button danger" type="submit" name="action" value="discard">Descartar</button>
+        <button class="button danger secondary" type="submit" name="action" value="discard_next">Descartar y siguiente</button>
+      </form>
     </section>
   </div>
 {% endblock %}

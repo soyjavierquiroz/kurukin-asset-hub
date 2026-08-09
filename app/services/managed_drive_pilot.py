@@ -172,6 +172,8 @@ class DriveClient(Protocol):
     ) -> DriveFile: ...
     def restore_file_location(self, file_id: str, original_name: str, original_parent_id: str) -> DriveFile: ...
     def verify_file_location(self, file_id: str, expected_name: str, expected_parent_id: str) -> bool: ...
+    def trash_file(self, file_id: str) -> DriveFile: ...
+    def untrash_file(self, file_id: str) -> DriveFile: ...
     def folder_exists(self, folder_id: str) -> bool: ...
 
 
@@ -3547,6 +3549,24 @@ class GoogleDriveMutationClient:
         ).execute()
         return drive_file_from_payload(payload)
 
+    def trash_file(self, file_id: str) -> DriveFile:
+        payload = self.service.files().update(
+            fileId=file_id,
+            body={"trashed": True},
+            supportsAllDrives=True,
+            fields=file_fields(),
+        ).execute()
+        return drive_file_from_payload(payload)
+
+    def untrash_file(self, file_id: str) -> DriveFile:
+        payload = self.service.files().update(
+            fileId=file_id,
+            body={"trashed": False},
+            supportsAllDrives=True,
+            fields=file_fields(),
+        ).execute()
+        return drive_file_from_payload(payload)
+
     def verify_file_location(self, file_id: str, expected_name: str, expected_parent_id: str) -> bool:
         metadata = self.get_file_metadata(file_id)
         return (
@@ -3706,6 +3726,24 @@ class GoogleDriveAPIClient:
             "PATCH",
             f"/files/{parse.quote(file_id)}?{query}",
             {"name": original_name, "trashed": False},
+        )
+        return drive_file_from_payload(payload)
+
+    def trash_file(self, file_id: str) -> DriveFile:
+        payload = self._json(
+            "PATCH",
+            f"/files/{parse.quote(file_id)}?"
+            + parse.urlencode({"fields": file_fields(), "supportsAllDrives": "true"}),
+            {"trashed": True},
+        )
+        return drive_file_from_payload(payload)
+
+    def untrash_file(self, file_id: str) -> DriveFile:
+        payload = self._json(
+            "PATCH",
+            f"/files/{parse.quote(file_id)}?"
+            + parse.urlencode({"fields": file_fields(), "supportsAllDrives": "true"}),
+            {"trashed": False},
         )
         return drive_file_from_payload(payload)
 

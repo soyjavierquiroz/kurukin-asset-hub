@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.db import Base, get_db_session
 from app.main import create_app
 from app.models import Asset, AssetAIAnalysis, AssetTag, Source
+from app.services.managed_drive_pilot import DriveFile
 from app.web.routes import bool_filter
 
 
@@ -106,6 +107,64 @@ def seed_assets(session_factory: sessionmaker[Session], count: int = 3) -> list[
             ids.append(asset.id)
         session.commit()
     return ids
+
+
+class FakeDiscardDrive:
+    def __init__(
+        self,
+        *,
+        expected_file_id: str = "drive-0",
+        trash_fails: bool = False,
+        verify_trashed: bool = True,
+    ) -> None:
+        self.expected_file_id = expected_file_id
+        self.trash_fails = trash_fails
+        self.verify_trashed = verify_trashed
+        self.trash_calls: list[str] = []
+        self.untrash_calls: list[str] = []
+        self.get_calls: list[str] = []
+
+    def trash_file(self, file_id: str) -> DriveFile:
+        assert file_id == self.expected_file_id
+        self.trash_calls.append(file_id)
+        if self.trash_fails:
+            raise RuntimeError("drive unavailable")
+        return self._file(file_id, trashed=True)
+
+    def untrash_file(self, file_id: str) -> DriveFile:
+        assert file_id == self.expected_file_id
+        self.untrash_calls.append(file_id)
+        return self._file(file_id, trashed=False)
+
+    def get_file_metadata(self, file_id: str) -> DriveFile:
+        assert file_id == self.expected_file_id
+        self.get_calls.append(file_id)
+        return self._file(file_id, trashed=self.verify_trashed)
+
+    def _file(self, file_id: str, *, trashed: bool) -> DriveFile:
+        return DriveFile(
+            id=file_id,
+            name="Asset desde Drive.mp4",
+            mime_type="video/mp4",
+            parents=["inbox"],
+            trashed=trashed,
+        )
+
+
+def install_fake_discard_drive(monkeypatch, drive: FakeDiscardDrive) -> FakeDiscardDrive:
+    monkeypatch.setattr("app.web.routes.drive_client_from_environment", lambda: drive)
+    monkeypatch.setattr("app.web.routes.mutation_client_for_apply", lambda client: client)
+    return drive
+
+
+def mark_pending(session_factory: sessionmaker[Session], asset_id: int, reason: str = "manual_check") -> None:
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        asset.status = "review_required"
+        asset.needs_human_review = True
+        asset.review_reason = reason
+        session.commit()
 
 
 def test_assets_gallery_filters_and_pagination(tmp_path: Path, monkeypatch) -> None:
@@ -361,6 +420,287 @@ def test_reviews_queue_and_form(tmp_path: Path, monkeypatch) -> None:
     assert "Revision humana" in form.text
     assert "visual_presentation" in form.text
     assert "Guardar y siguiente" in form.text
+    assert "Descartar" in form.text
+    assert "Descartar y siguiente" in form.text
+    assert "confirm(" in form.text
+    assert "asset-0.mp4" in form.text
+
+
+def test_review_discard_success_trashes_drive_deletes_asset_and_redirects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    preview_dir = tmp_path / str(asset_id)
+    preview_dir.mkdir(parents=True)
+    (preview_dir / "thumbnail.webp").write_bytes(b"webp")
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/reviews"
+    assert drive.trash_calls == ["drive-0"]
+    assert drive.get_calls == ["drive-0"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is None
+        assert session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset_id)) is None
+    assert not preview_dir.exists()
+
+
+def test_review_discard_next_redirects_to_next_pending(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    ids = seed_assets(session_factory, count=3)
+    mark_pending(session_factory, ids[1])
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{ids[0]}/discard",
+        headers=auth_header(),
+        data={"action": "discard_next"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/reviews/{ids[1]}"
+    assert drive.trash_calls == ["drive-0"]
+    with session_factory() as session:
+        assert session.get(Asset, ids[0]) is None
+
+
+def test_review_discard_next_completes_when_last_pending(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory, count=1)[0]
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard_next"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/reviews?completed=true"
+
+
+def test_review_discard_drive_trash_failure_keeps_db(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(
+        monkeypatch,
+        FakeDiscardDrive(expected_file_id="drive-0", trash_fails=True),
+    )
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 502
+    assert drive.trash_calls == ["drive-0"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is not None
+
+
+def test_review_discard_drive_verification_failure_keeps_db(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(
+        monkeypatch,
+        FakeDiscardDrive(expected_file_id="drive-0", verify_trashed=False),
+    )
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 502
+    assert drive.trash_calls == ["drive-0"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is not None
+
+
+def test_review_discard_db_commit_failure_attempts_untrash_and_keeps_asset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    original_commit = Session.commit
+    fail_next_commit = {"enabled": True}
+
+    def fail_commit_once(self):
+        if fail_next_commit["enabled"]:
+            fail_next_commit["enabled"] = False
+            raise RuntimeError("database commit failed")
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", fail_commit_once)
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 500
+    assert drive.trash_calls == ["drive-0"]
+    assert drive.untrash_calls == ["drive-0"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is not None
+
+
+def test_review_discard_never_uses_filename_or_path_for_drive(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        asset.filename = "not-the-drive-id.mp4"
+        asset.remote_path = "ambiguous/not-the-drive-id.mp4"
+        session.commit()
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert drive.trash_calls == ["drive-0"]
+
+
+def test_discarded_asset_detail_is_404_and_absent_from_assets_and_reviews(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    client = TestClient(app)
+
+    discard = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard"},
+        follow_redirects=False,
+    )
+    detail = client.get(f"/assets/{asset_id}", headers=auth_header())
+    assets = client.get("/assets", headers=auth_header())
+    reviews = client.get("/reviews", headers=auth_header())
+
+    assert discard.status_code == 303
+    assert detail.status_code == 404
+    assert "asset-0.mp4" not in assets.text
+    assert "asset-0.mp4" not in reviews.text
+
+
+def test_review_discard_preview_traversal_is_ignored(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "root"))
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "thumbnail.webp"
+    outside_file.write_bytes(b"do-not-delete")
+    install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        asset.thumbnail_path = "pilot-previews/../outside/thumbnail.webp"
+        asset.preview_path = None
+        session.commit()
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}/discard",
+        headers=auth_header(),
+        data={"action": "discard"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert outside_file.read_bytes() == b"do-not-delete"
+
+
+def test_review_discard_preview_cleanup_failure_warns_but_succeeds(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+
+    def fail_cleanup(asset_id: int, preview_paths: list[str | None]) -> None:
+        raise RuntimeError("cannot clean preview")
+
+    monkeypatch.setattr("app.web.routes.cleanup_discard_preview_dir", fail_cleanup)
+    client = TestClient(app)
+
+    with caplog.at_level("WARNING", logger="app.web.routes"):
+        response = client.post(
+            f"/reviews/{asset_id}/discard",
+            headers=auth_header(),
+            data={"action": "discard"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert "Preview cleanup failed" in caplog.text
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is None
+
+
+def test_reviews_index_does_not_call_drive(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory)
+
+    def fail_drive():
+        raise AssertionError("Drive should not be called by GET /reviews")
+
+    monkeypatch.setattr("app.web.routes.drive_client_from_environment", fail_drive)
+    client = TestClient(app)
+
+    response = client.get("/reviews", headers=auth_header())
+
+    assert response.status_code == 200
 
 
 def test_review_save_and_next_redirects_to_next_pending(tmp_path: Path, monkeypatch) -> None:

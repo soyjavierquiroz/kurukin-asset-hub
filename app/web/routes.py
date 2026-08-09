@@ -1,8 +1,10 @@
 from collections import defaultdict
 from datetime import UTC, datetime
+import logging
 import math
 import mimetypes
 import secrets
+import shutil
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlencode
@@ -11,7 +13,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Select, String, and_, cast, func, or_, select
+from sqlalchemy import Select, String, and_, cast, delete, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -20,9 +22,14 @@ from app.models import (
     Asset,
     AssetAllowedBrand,
     AssetAIAnalysis,
+    AssetCollection,
     AssetKeyword,
+    AssetNiche,
+    AssetSegment,
+    AssetSegmentationRun,
     AssetTag,
     Brand,
+    JobAssetBundleItem,
     Niche,
     Product,
     Source,
@@ -46,7 +53,12 @@ from app.services.asset_preview import (
     safe_asset_uid,
 )
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
-from app.services.managed_drive_pilot import ReviewApproval, approve_review_asset
+from app.services.managed_drive_pilot import (
+    ReviewApproval,
+    approve_review_asset,
+    drive_client_from_environment,
+    mutation_client_for_apply,
+)
 from app.services.long_video_segmentation import (
     approve_segmentation,
     delete_original_after_approval,
@@ -57,6 +69,7 @@ from app.services.source_sync import scan_source
 router = APIRouter(tags=["admin"])
 templates = Jinja2Templates(directory="app/templates")
 security = HTTPBasic()
+logger = logging.getLogger(__name__)
 
 
 def require_admin(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> str:
@@ -143,6 +156,61 @@ def pending_review_filter():
 
 def review_query_base() -> Select[tuple[Asset]]:
     return select(Asset).where(pending_review_filter())
+
+
+def next_pending_review_id(session: Session) -> int | None:
+    return session.scalar(
+        select(Asset.id).where(pending_review_filter()).order_by(Asset.created_at.asc(), Asset.id.asc()).limit(1)
+    )
+
+
+def preview_directory_for_discard(asset_id: int, preview_paths: list[str | None]) -> Path:
+    root = Path(get_settings().pilot_preview_root).resolve()
+    candidates: list[Path] = []
+    for preview_path in preview_paths:
+        local_path = local_preview_file(preview_path)
+        if local_path is None:
+            continue
+        try:
+            resolved = local_path.resolve(strict=False)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        candidates.append(resolved.parent)
+    if candidates:
+        return candidates[0]
+    return root / str(asset_id)
+
+
+def cleanup_discard_preview_dir(asset_id: int, preview_paths: list[str | None]) -> None:
+    root = Path(get_settings().pilot_preview_root).resolve()
+    preview_dir = preview_directory_for_discard(asset_id, preview_paths).resolve(strict=False)
+    try:
+        preview_dir.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("preview cleanup path escaped PILOT_PREVIEW_ROOT") from exc
+    if preview_dir == root:
+        raise RuntimeError("preview cleanup refused PILOT_PREVIEW_ROOT")
+    if not preview_dir.exists():
+        return
+    shutil.rmtree(preview_dir, ignore_errors=False)
+
+
+def delete_asset_with_dependents(session: Session, asset: Asset) -> None:
+    asset_id = asset.id
+    session.execute(delete(AssetNiche).where(AssetNiche.asset_id == asset_id))
+    session.execute(delete(AssetCollection).where(AssetCollection.asset_id == asset_id))
+    session.execute(update(JobAssetBundleItem).where(JobAssetBundleItem.asset_id == asset_id).values(asset_id=None))
+    session.execute(update(AssetSegment).where(AssetSegment.child_asset_id == asset_id).values(child_asset_id=None))
+    run_ids = session.scalars(
+        select(AssetSegmentationRun.id).where(AssetSegmentationRun.parent_asset_id == asset_id)
+    ).all()
+    if run_ids:
+        session.execute(delete(AssetSegment).where(AssetSegment.run_id.in_(run_ids)))
+        session.execute(delete(AssetSegmentationRun).where(AssetSegmentationRun.id.in_(run_ids)))
+    session.execute(delete(AssetSegment).where(AssetSegment.parent_asset_id == asset_id))
+    session.execute(update(Asset).where(Asset.parent_asset_id == asset_id).values(parent_asset_id=None))
+    session.delete(asset)
 
 
 def asset_sort_order(sort: str | None) -> list[object]:
@@ -766,6 +834,76 @@ def reviews_approve(
             return redirect_to("/reviews?completed=true")
         return redirect_to(f"/reviews/{next_asset_id}")
     return redirect_to(f"/assets/{asset_id}")
+
+
+@router.post("/reviews/{asset_id}/discard")
+def reviews_discard(
+    asset_id: int,
+    _: AdminUser,
+    session: DbSession,
+    action: Annotated[str, Form()] = "discard",
+):
+    if action not in {"discard", "discard_next"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid discard action")
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    if asset.status != "review_required" and not asset.needs_human_review:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
+    file_id = asset.drive_file_id
+    if not file_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing Drive file ID")
+
+    preview_paths = [asset.thumbnail_path, asset.preview_path]
+    read_client = drive_client_from_environment()
+    drive_client = mutation_client_for_apply(read_client)
+    try:
+        drive_client.trash_file(file_id)
+        metadata = drive_client.get_file_metadata(file_id)
+    except Exception as exc:
+        logger.exception("Drive trash failed for asset_id=%s file_id=%s", asset_id, file_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Drive trash failed: {exc}",
+        ) from exc
+    if metadata.id != file_id or not metadata.trashed:
+        logger.error(
+            "Drive trash verification failed for asset_id=%s file_id=%s trashed=%s",
+            asset_id,
+            file_id,
+            metadata.trashed,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Drive trash verification failed",
+        )
+
+    try:
+        delete_asset_with_dependents(session, asset)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        try:
+            drive_client.untrash_file(file_id)
+        except Exception:
+            logger.exception("Drive untrash rollback failed for asset_id=%s file_id=%s", asset_id, file_id)
+        logger.exception("Database discard failed after Drive trash for asset_id=%s file_id=%s", asset_id, file_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database discard failed after Drive trash; Drive untrash rollback was attempted",
+        ) from exc
+
+    try:
+        cleanup_discard_preview_dir(asset_id, preview_paths)
+    except Exception:
+        logger.warning("Preview cleanup failed for discarded asset_id=%s", asset_id, exc_info=True)
+
+    if action == "discard_next":
+        next_asset_id = next_pending_review_id(session)
+        if next_asset_id is None:
+            return redirect_to("/reviews?completed=true")
+        return redirect_to(f"/reviews/{next_asset_id}")
+    return redirect_to("/reviews")
 
 
 def serve_preview_file(asset_uid: str, filename: str) -> FileResponse:

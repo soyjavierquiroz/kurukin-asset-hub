@@ -65,7 +65,8 @@ input, select, textarea {
 textarea { min-height: 84px; resize: vertical; }
 .filter-actions { align-items: end; display: flex; gap: 8px; }
 .button.primary { background: var(--accent); border-color: var(--accent); color: #07110f; }
-.button.danger { border-color: #774047; color: #f0b7bd; }
+.button.danger { background: #7f1d2a; border-color: #a94452; color: #ffe5e8; }
+.button.danger.secondary { background: transparent; border-color: #8e3f4a; color: #f0b7bd; }
 .asset-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .card { overflow: hidden; }
 .thumb { align-items: center; aspect-ratio: 16 / 10; background: #0c0d10; display: flex; justify-content: center; width: 100%; }
