@@ -280,6 +280,7 @@ class BatchCounters:
     duplicates: int = 0
     pending_analysis: int = 0
     already_applied: int = 0
+    plans_selected: int = 0
 
 
 @dataclass

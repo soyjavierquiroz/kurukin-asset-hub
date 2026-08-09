@@ -823,6 +823,201 @@ def test_human_approval_records_manual_override(tmp_path: Path, monkeypatch) -> 
         assert manual.result_json["visual_presentation"] == "feminine"
 
 
+def test_review_without_meaningful_naming_source_stays_in_review(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        asset.title = None
+        asset.description = "Respuesta NVIDIA invalida para source.mp4."
+        asset.primary_topic = "revision manual"
+        asset.target_name = "someone-is-driving-a-car__16x9__12345678.mp4"
+        asset.filename = "source.mp4"
+        analysis = asset.ai_analyses[0]
+        analysis.result_json = {
+            "primary_topic": "revision manual",
+            "title_es": "source.mp4",
+            "description_es": "Respuesta NVIDIA invalida para source.mp4.",
+            "tags": ["manejando", "automovil", "chofer"],
+        }
+        session.commit()
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}",
+        headers=auth_header(),
+        data={
+            "visual_presentation": "not_applicable",
+            "visual_presentation_confidence": "0.4",
+            "person_visibility": "not_applicable",
+            "people_count": "",
+            "primary_theme": "otros",
+            "primary_topic": "revision manual",
+            "tags": "manejando, automovil, chofer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Indica un Primary topic descriptivo para poder aprobar este asset." in response.text
+    assert "Primary topic debe ser una frase descriptiva." in response.text
+    assert "manejando, automovil, chofer" in response.text
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        assert asset.status == "review_required"
+        assert asset.needs_human_review is True
+        assert session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset_id, AssetAIAnalysis.provider == "human")) is None
+
+
+def test_review_with_valid_primary_topic_is_approved(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    client = TestClient(app)
+
+    response = client.post(
+        f"/reviews/{asset_id}",
+        headers=auth_header(),
+        data={
+            "visual_presentation": "not_applicable",
+            "visual_presentation_confidence": "0.9",
+            "person_visibility": "not_applicable",
+            "people_count": "",
+            "primary_theme": "personas",
+            "primary_topic": "persona haciendo yoga en sala",
+            "tags": "persona, yoga",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        assert asset.status == "move_planned"
+        assert asset.needs_human_review is False
+        assert asset.target_name == "persona-haciendo-yoga-en-sala__9:16__a0754b46.mp4"
+
+
+def test_edit_metadata_planned_recalculates_plan_without_drive(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[1]
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        asset.status = "move_planned"
+        asset.move_status = "planned"
+        asset.drive_file_id = "drive-planned"
+        asset.original_name = "old.mp4"
+        asset.original_parent_id = "inbox"
+        asset.orientation = "horizontal-16x9"
+        asset.target_name = "old__16x9__7a6fdb97.mp4"
+        asset.remote_path = f"10_genericos/video/lote-0001/{asset.target_name}"
+        asset.source_path = asset.remote_path
+        asset.path_layout_version = "compact_v2"
+        asset.reviewed_at = datetime.now(UTC)
+        old_hash = asset.plan_hash = "old-hash"
+        session.commit()
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("Drive or AI must not be called")
+
+    monkeypatch.setattr("app.services.managed_drive_pilot.drive_client_from_environment", fail)
+    monkeypatch.setattr("app.services.managed_drive_pilot.call_nvidia_vision", fail)
+    monkeypatch.setattr("app.services.managed_drive_pilot.call_openai_vision", fail)
+    client = TestClient(app)
+
+    response = client.post(
+        f"/assets/{asset_id}/edit-metadata",
+        headers=auth_header(),
+        data={
+            "visual_presentation": "not_applicable",
+            "visual_presentation_confidence": "0.9",
+            "person_visibility": "not_applicable",
+            "people_count": "",
+            "primary_theme": "transporte",
+            "primary_topic": "conducción urbana en primera persona",
+            "tags": "conduccion, ciudad",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/assets/{asset_id}?metadata_status=planned_recalculated"
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        assert asset.move_status == "planned"
+        assert asset.status == "move_planned"
+        assert asset.target_name == "conduccion-urbana-en-primera-persona__16x9__10259aa3.mp4"
+        assert asset.plan_hash and asset.plan_hash != old_hash
+        assert session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset_id, AssetAIAnalysis.provider == "nvidia")) is not None
+        assert session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset_id, AssetAIAnalysis.provider == "human")) is not None
+
+    detail = client.get(response.headers["location"], headers=auth_header())
+    assert "Metadata actualizada · plan recalculado" in detail.text
+
+
+def test_edit_metadata_moved_does_not_call_drive_or_change_move_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[1]
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        asset.status = "ready"
+        asset.move_status = "moved"
+        asset.drive_file_id = "drive-moved"
+        asset.original_name = "old.mp4"
+        asset.original_parent_id = "inbox"
+        asset.target_parent_id = "parent"
+        asset.filename = "old__16x9__c38b9647.mp4"
+        asset.target_name = asset.filename
+        asset.remote_path = f"10_genericos/video/lote-0001/{asset.target_name}"
+        asset.source_path = asset.remote_path
+        asset.path_layout_version = "compact_v2"
+        session.commit()
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("Drive or AI must not be called")
+
+    monkeypatch.setattr("app.services.managed_drive_pilot.drive_client_from_environment", fail)
+    monkeypatch.setattr("app.services.managed_drive_pilot.call_nvidia_vision", fail)
+    monkeypatch.setattr("app.services.managed_drive_pilot.call_openai_vision", fail)
+    client = TestClient(app)
+
+    response = client.post(
+        f"/assets/{asset_id}/edit-metadata",
+        headers=auth_header(),
+        data={
+            "visual_presentation": "not_applicable",
+            "visual_presentation_confidence": "0.9",
+            "person_visibility": "not_applicable",
+            "people_count": "",
+            "primary_theme": "transporte",
+            "primary_topic": "conducción urbana en primera persona",
+            "tags": "conduccion, ciudad",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/assets/{asset_id}?metadata_status=rename_pending"
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        assert asset.status == "ready"
+        assert asset.move_status == "moved"
+        assert asset.target_name == "old__16x9__c38b9647.mp4"
+        assert session.scalar(select(AssetAIAnalysis).where(AssetAIAnalysis.asset_id == asset_id, AssetAIAnalysis.provider == "human")) is not None
+
+    detail = client.get(response.headers["location"], headers=auth_header())
+    assert "Metadata actualizada · nombre físico pendiente de sincronizar" in detail.text
+
+
 def test_web_requests_do_not_call_drive_or_ai(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
     app, session_factory = make_test_app(tmp_path)
@@ -834,6 +1029,9 @@ def test_web_requests_do_not_call_drive_or_ai(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr("app.web.routes.generate_asset_preview", fail)
     monkeypatch.setattr("app.web.routes.enrich_asset_with_ai", fail)
     monkeypatch.setattr("app.web.routes.scan_source", fail)
+    monkeypatch.setattr("app.services.managed_drive_pilot.drive_client_from_environment", fail)
+    monkeypatch.setattr("app.services.managed_drive_pilot.call_nvidia_vision", fail)
+    monkeypatch.setattr("app.services.managed_drive_pilot.call_openai_vision", fail)
     client = TestClient(app)
 
     assert client.get("/assets", headers=auth_header()).status_code == 200

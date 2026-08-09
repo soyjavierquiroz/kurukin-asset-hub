@@ -16,6 +16,7 @@
       <div class="countline">
         <a href="/assets">Assets</a>
         {% if asset.status == "review_required" or asset.needs_human_review %}<a href="/reviews/{{ asset.id }}">Abrir revision</a>{% endif %}
+        <a href="/assets/{{ asset.id }}/edit-metadata">Editar metadata</a>
         <span>Regenerate Preview</span>
         <span>Run AI Enrichment</span>
         <span>Regenerate AI Enrichment</span>
@@ -30,6 +31,14 @@
       {% if asset.ai_enrichment_confidence is not none %}<span class="badge">AI {{ "%.2f"|format(asset.ai_enrichment_confidence) }}</span>{% endif %}
     </div>
   </div>
+
+  {% if metadata_status == "planned_recalculated" %}
+    <div class="notice">Metadata actualizada · plan recalculado</div>
+  {% elif metadata_status == "rename_pending" %}
+    <div class="notice">Metadata actualizada · nombre físico pendiente de sincronizar</div>
+  {% elif metadata_status == "updated" %}
+    <div class="notice">Metadata actualizada</div>
+  {% endif %}
 
   <div class="detail-grid">
     <section class="detail-panel">

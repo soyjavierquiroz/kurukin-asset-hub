@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="page-head">
+    <div>
+      <h1>Editar metadata</h1>
+      <div class="countline">
+        <a href="/assets/{{ asset.id }}">Detalle</a>
+        <span>{{ asset.filename }}</span>
+      </div>
+    </div>
+    <div class="badges">
+      <span class="badge">{{ asset.status }}</span>
+      <span class="badge">{{ asset.move_status }}</span>
+    </div>
+  </div>
+
+  <section class="detail-panel">
+    <h2>Metadata humana</h2>
+    {% if validation_error %}
+      <div class="notice">{{ validation_error }} Primary topic debe ser una frase descriptiva.</div>
+    {% endif %}
+    <form class="form-grid" method="post">
+      <label>Visual presentation
+        <select name="visual_presentation" required>
+          {% for value in visual_presentation_values %}
+            <option value="{{ value }}" {% if form_values.get('visual_presentation') == value %}selected{% endif %}>{{ value }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Visual presentation confidence
+        <input type="number" name="visual_presentation_confidence" min="0" max="1" step="0.01" value="{{ form_values.get('visual_presentation_confidence') }}" required>
+      </label>
+      <label>Person visibility
+        <select name="person_visibility" required>
+          {% for value in person_visibility_values %}
+            <option value="{{ value }}" {% if form_values.get('person_visibility') == value %}selected{% endif %}>{{ value }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>People count
+        <input type="number" name="people_count" min="0" step="1" value="{{ form_values.get('people_count') if form_values.get('people_count') is not none else '' }}">
+      </label>
+      <label>Primary theme
+        <input name="primary_theme" value="{{ form_values.get('primary_theme', '') }}">
+      </label>
+      <label>Primary topic
+        <input name="primary_topic" value="{{ form_values.get('primary_topic', '') }}">
+      </label>
+      <label class="form-wide">Tags
+        <textarea name="tags">{{ form_values.get('tags', '') }}</textarea>
+      </label>
+      <div class="filter-actions form-wide">
+        <button class="button primary" type="submit">Guardar metadata</button>
+        <a class="button" href="/assets/{{ asset.id }}">Cancelar</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

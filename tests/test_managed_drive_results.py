@@ -342,6 +342,7 @@ def test_batch_counters_assets_and_dates_serialize_without_shared_state() -> Non
         "duplicates": 0,
         "pending_analysis": 0,
         "already_applied": 0,
+        "plans_selected": 0,
         "assets": [
             {
                 "drive_file_id": "file-1",

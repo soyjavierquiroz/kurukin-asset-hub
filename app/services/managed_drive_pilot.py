@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import configparser
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -181,6 +181,78 @@ class BatchLockUnavailable(ManagedDriveError):
     error_type = "batch_lock_unavailable"
 
 
+@dataclass(frozen=True)
+class ReviewedReplanResult:
+    dry_run: bool
+    file_id: str
+    changed: bool
+    skipped_reason: str | None
+    target_name_before: str | None
+    target_name_after: str | None
+    target_path_before: str | None
+    target_path_after: str | None
+    plan_hash_before: str | None
+    plan_hash_after: str | None
+    status_before: str | None
+    status_after: str | None
+    move_status_before: str | None
+    move_status_after: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dry_run": self.dry_run,
+            "file_id": self.file_id,
+            "changed": self.changed,
+            "skipped_reason": self.skipped_reason,
+            "target_name_before": self.target_name_before,
+            "target_name_after": self.target_name_after,
+            "target_path_before": self.target_path_before,
+            "target_path_after": self.target_path_after,
+            "plan_hash_before": self.plan_hash_before,
+            "plan_hash_after": self.plan_hash_after,
+            "status_before": self.status_before,
+            "status_after": self.status_after,
+            "move_status_before": self.move_status_before,
+            "move_status_after": self.move_status_after,
+        }
+
+
+@dataclass(frozen=True)
+class MovedRenameResult:
+    dry_run: bool
+    file_id: str
+    changed: bool
+    skipped_reason: str | None
+    drive_file_id_before: str | None
+    drive_file_id_after: str | None
+    parent_before: str | None
+    parent_after: str | None
+    target_name_before: str | None
+    target_name_after: str | None
+    target_path_before: str | None
+    target_path_after: str | None
+    plan_hash_before: str | None
+    plan_hash_after: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dry_run": self.dry_run,
+            "file_id": self.file_id,
+            "changed": self.changed,
+            "skipped_reason": self.skipped_reason,
+            "drive_file_id_before": self.drive_file_id_before,
+            "drive_file_id_after": self.drive_file_id_after,
+            "parent_before": self.parent_before,
+            "parent_after": self.parent_after,
+            "target_name_before": self.target_name_before,
+            "target_name_after": self.target_name_after,
+            "target_path_before": self.target_path_before,
+            "target_path_after": self.target_path_after,
+            "plan_hash_before": self.plan_hash_before,
+            "plan_hash_after": self.plan_hash_after,
+        }
+
+
 class NvidiaBatchAI:
     def __init__(self, model: str, pause_seconds: float = 0.75) -> None:
         self.model = model
@@ -224,7 +296,7 @@ class NvidiaBatchAI:
             title_es=asset.filename,
             description_es=f"Respuesta NVIDIA invalida para {asset.filename}.",
             primary_theme="otros",
-            primary_topic="revision manual",
+            primary_topic=None,
             tags=[],
             tags_source=None,
             suggested_uses=["revision"],
@@ -508,31 +580,33 @@ def run_drive_batch_apply(
     assets: list[BatchAssetResult],
 ) -> BatchResult:
     assert mutation_client is not None
-    listed_by_id: dict[str, tuple[DriveFile, BatchScope]] = {}
-    pending_seen: set[str] = set()
-    for scope_config in scopes:
-        listed = drive_client.list_folder(scope_config.source_folder_id, request_data.max_per_scope)
-        counters.files_discovered += len(listed)
-        for drive_file in listed:
-            listed_by_id.setdefault(drive_file.id, (drive_file, scope_config))
-            existing = session.scalar(select(Asset).where(Asset.drive_file_id == drive_file.id))
-            if existing is None:
-                pending_seen.add(drive_file.id)
-                assets.append(pending_analysis_batch_asset(drive_file, scope_config))
-    counters.pending_analysis = len(pending_seen)
-
-    plans_to_apply = apply_candidates(session, request_data, scopes, listed_by_id)
+    plans_to_apply = apply_candidates(session, request_data, scopes)
     validate_apply_candidates(request_data, plans_to_apply)
+    counters.plans_selected = len(plans_to_apply)
 
-    for asset, scope_config in plans_to_apply:
+    for asset, _scope_config in plans_to_apply:
         assert asset is not None
-        plan = ingest_drive_assets(
-            session,
-            batch_ingest_request(scope_config, asset.drive_file_id or "", apply=True),
-            drive_client,
-            ai_enricher=forbidden_batch_ai,
-            mutation_client=mutation_client,
-        )[0]
+        request_for_asset = replace(ingest_request_from_asset(asset), apply=True, dry_run=False)
+        if moved_asset_can_noop(asset):
+            plan = resolve_applied_idempotence(session, request_for_asset, drive_client)
+            if plan is None:
+                raise ValueError(f"--only-file-id is not apply-eligible: {asset.drive_file_id}")
+        else:
+            assert_persisted_plan_hash(asset)
+            plan = plan_from_persisted_asset(
+                asset,
+                request_for_asset,
+                DriveFile(
+                    id=asset.drive_file_id or "",
+                    name=asset.original_name or asset.filename,
+                    mime_type=asset.mime_type,
+                    parents=[asset.original_parent_id] if asset.original_parent_id else [],
+                    size=asset.source_size_bytes,
+                    modified_time=asset.source_modified_at,
+                ),
+            )
+            target_parts = str(asset.remote_path).split("/")[:-1]
+            plan = apply_move(session, mutation_client, asset, request_for_asset, target_parts, plan)
         if plan.result == "applied":
             counters.files_applied += 1
         if plan.result == "already_applied":
@@ -634,12 +708,28 @@ def approve_review_asset(session: Session, approval: ReviewApproval) -> DriveSta
     if asset.status != "review_required" and not asset.needs_human_review:
         raise ValueError("asset is not review_required")
     original_scope = asset.scope
+    record_human_review_override(session, asset, approval)
+    asset.scope = original_scope
+    asset.status = "move_planned"
+    asset.move_status = "planned"
+    asset.needs_human_review = False
+    asset.review_reason = None
+    asset.reviewed_at = datetime.now(UTC)
+    asset.reviewed_by = approval.reviewed_by
+    rebuild_reviewed_asset_plan(session, asset, apply=True)
+    session.commit()
+    return drive_status_row(asset)
+
+
+def record_human_review_override(session: Session, asset: Asset, approval: ReviewApproval) -> None:
     if approval.primary_theme:
         asset.primary_theme = controlled_classification(
             ManagedAIResult(primary_theme=approval.primary_theme, primary_topic=asset.primary_topic or "otros")
         ).primary_theme
-    if approval.primary_topic:
+    if approval.primary_topic and is_meaningful_naming_text(approval.primary_topic):
         asset.primary_topic = normalize_primary_topic(approval.primary_topic)
+    elif not is_meaningful_naming_text(asset.primary_topic):
+        asset.primary_topic = None
     if approval.tags:
         update_latest_analysis_tags(session, asset, list(approval.tags))
     latest_analysis = session.scalar(
@@ -682,13 +772,345 @@ def approve_review_asset(session: Session, approval: ReviewApproval) -> DriveSta
             confidence=approval.visual_presentation_confidence,
         )
     )
-    if not asset.primary_theme:
-        asset.primary_theme = "otros"
-    if not asset.primary_topic:
-        asset.primary_topic = "otros"
+    session.flush()
+
+
+def review_approval_has_meaningful_naming_source(asset: Asset, approval: ReviewApproval) -> bool:
+    human_result = latest_human_result_for_review(asset)
+    if approval.primary_topic is not None:
+        human_result["primary_topic"] = clean_review_value(approval.primary_topic)
+    if approval.tags:
+        human_result["tags"] = list(approval.tags)
+    if approval.visual_presentation is not None:
+        human_result["visual_presentation"] = approval.visual_presentation
+    if approval.visual_presentation_confidence is not None:
+        human_result["visual_presentation_confidence"] = approval.visual_presentation_confidence
+    if approval.person_visibility is not None:
+        human_result["person_visibility"] = approval.person_visibility
+    if approval.people_count is not None:
+        human_result["people_count"] = approval.people_count
+    candidate_asset = asset
+    if approval.primary_topic is not None:
+        candidate_asset = replace_asset_naming_topic(asset, approval.primary_topic)
+    return reviewed_asset_naming_text(candidate_asset, human_result, latest_result_for_review(asset)) is not None
+
+
+def latest_human_result_for_review(asset: Asset) -> dict[str, Any]:
+    analyses = sorted(asset.ai_analyses, key=lambda item: item.created_at or datetime.min, reverse=True)
+    for analysis in analyses:
+        if analysis.provider == "human" or analysis.model == "human-review":
+            return dict(analysis.result_json or {})
+    return {}
+
+
+def latest_result_for_review(asset: Asset) -> dict[str, Any]:
+    analyses = sorted(asset.ai_analyses, key=lambda item: item.created_at or datetime.min, reverse=True)
+    return dict(analyses[0].result_json or {}) if analyses else {}
+
+
+def clean_review_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def replace_asset_naming_topic(asset: Asset, primary_topic: str | None) -> Any:
+    class NamingAsset:
+        pass
+
+    candidate = NamingAsset()
+    candidate.primary_topic = clean_review_value(primary_topic) or asset.primary_topic
+    candidate.target_name = asset.target_name
+    candidate.filename = asset.filename
+    candidate.title = asset.title
+    candidate.action_description = asset.action_description
+    candidate.visual_description = asset.visual_description
+    candidate.description = asset.description
+    return candidate
+
+
+def update_reviewed_asset_metadata(session: Session, asset: Asset, approval: ReviewApproval) -> ReviewedReplanResult | None:
+    record_human_review_override(session, asset, approval)
+    asset.reviewed_at = datetime.now(UTC)
+    asset.reviewed_by = approval.reviewed_by
+    if asset.move_status == "planned":
+        result = rebuild_reviewed_asset_plan(session, asset, apply=True, preserve_batch=True)
+        session.commit()
+        return result
+    session.commit()
+    if asset.move_status == "moved":
+        result = rebuild_reviewed_asset_plan(session, asset, apply=False, preserve_batch=True)
+        session.rollback()
+        return result
+    return None
+
+
+def reviewed_asset_classification(asset: Asset) -> Classification:
+    normalized = controlled_classification(
+        ManagedAIResult(
+            primary_theme=asset.primary_theme or "otros",
+            primary_topic=asset.primary_topic or "otros",
+            confidence={"overall": 1.0},
+        )
+    )
+    return Classification(normalized.primary_theme, normalized.primary_topic, ambiguous=False)
+
+
+def reviewed_asset_naming_result(asset: Asset) -> ManagedAIResult:
+    analyses = sorted(asset.ai_analyses, key=lambda item: item.created_at or datetime.min, reverse=True)
+    human_result = next(
+        (
+            dict(analysis.result_json or {})
+            for analysis in analyses
+            if analysis.provider == "human" or analysis.model == "human-review"
+        ),
+        {},
+    )
+    latest_result = dict(analyses[0].result_json or {}) if analyses else {}
+    naming_text = reviewed_asset_naming_text(asset, human_result, latest_result)
+    if naming_text is None:
+        return ManagedAIResult(
+            primary_theme=asset.primary_theme or latest_result.get("primary_theme"),
+            primary_topic=asset.primary_topic or latest_result.get("primary_topic"),
+            visual_presentation=latest_result.get("visual_presentation") or "not_applicable",
+            visual_presentation_confidence=float(latest_result.get("visual_presentation_confidence") or 0.0),
+            person_visibility=latest_result.get("person_visibility") or "not_applicable",
+            people_count=latest_result.get("people_count"),
+            has_visible_text=bool(asset.has_visible_text),
+            has_logo=bool(asset.has_logo),
+            generic_compatibility=bool(asset.generic_compatibility),
+            camera_motion=asset.camera_motion or "unknown",
+            shot_type="unknown",
+            subject_position=asset.subject_position or "unknown",
+            confidence={"overall": 1.0},
+            ai_analysis_mode="PERSISTED",
+        )
+    return ManagedAIResult(
+        title_es=naming_text,
+        description_es=asset.description or latest_result.get("description_es"),
+        primary_theme=asset.primary_theme or latest_result.get("primary_theme"),
+        primary_topic=asset.primary_topic or latest_result.get("primary_topic"),
+        tags=[str(tag) for tag in (human_result.get("tags") or latest_result.get("tags") or [])],
+        visual_presentation=latest_result.get("visual_presentation") or "not_applicable",
+        visual_presentation_confidence=float(latest_result.get("visual_presentation_confidence") or 0.0),
+        person_visibility=latest_result.get("person_visibility") or "not_applicable",
+        people_count=latest_result.get("people_count"),
+        has_visible_text=bool(asset.has_visible_text),
+        has_logo=bool(asset.has_logo),
+        generic_compatibility=bool(asset.generic_compatibility),
+        camera_motion=asset.camera_motion or "unknown",
+        shot_type="unknown",
+        subject_position=asset.subject_position or "unknown",
+        confidence={"overall": 1.0},
+        ai_analysis_mode="PERSISTED",
+    )
+
+
+PLACEHOLDER_NAMING_SLUGS = {
+    "revision",
+    "revision-manual",
+    "manual-review",
+    "ai-response-invalid",
+    "respuesta-nvidia-invalida",
+    "otros",
+    "otro",
+    "asset",
+    "archivo",
+    "video",
+    "imagen",
+}
+PLACEHOLDER_NAMING_PREFIXES = (
+    "revision-manual",
+    "manual-review",
+    "ai-response-invalid",
+    "respuesta-nvidia-invalida",
+    "respuesta-nvidia-invalida-para",
+)
+NON_SEMANTIC_NAMING_PREFIXES = (
+    "someone-is-",
+    "there-are-",
+    "there-is-",
+    "a-group-of-",
+)
+SPANISH_NAMING_TERMS = {
+    "automovil",
+    "auto",
+    "calle",
+    "celular",
+    "chofer",
+    "coche",
+    "cocina",
+    "comida",
+    "conduccion",
+    "conduciendo",
+    "conductor",
+    "desde",
+    "familia",
+    "globos",
+    "gps",
+    "interior",
+    "maneja",
+    "manejando",
+    "mensajes",
+    "mientras",
+    "mujer",
+    "noche",
+    "nocturna",
+    "nocturno",
+    "personas",
+    "telefono",
+    "tunel",
+    "usando",
+    "vista",
+    "cama",
+    "cumpleanos",
+    "expresion",
+    "preocupada",
+}
+
+
+def reviewed_asset_naming_text(
+    asset: Any,
+    human_result: dict[str, Any],
+    latest_result: dict[str, Any],
+) -> str | None:
+    current = existing_semantic_stem(asset.target_name or asset.filename)
+    candidates: list[tuple[str, str | None]] = []
+    candidates.extend(("topic", value) for value in [asset.primary_topic, human_result.get("primary_topic")])
+    candidates.extend(("human", value) for value in human_naming_values(human_result))
+    candidates.extend(
+        ("asset", value)
+        for value in [asset.title, asset.action_description, asset.visual_description, asset.description]
+    )
+    candidates.extend(("analysis", value) for value in analysis_naming_values(latest_result))
+    if is_meaningful_naming_text(current):
+        candidates.append(("existing", current))
+
+    for source, value in candidates:
+        if not is_meaningful_naming_text(value):
+            continue
+        candidate = str(value).strip()
+        if (
+            source != "existing"
+            and is_descriptive_spanish_stem(current)
+            and candidate_is_less_descriptive(source, candidate, current)
+        ):
+            return current
+        return normalize_naming_text(candidate)
+    return None
+
+
+def human_naming_values(result: dict[str, Any]) -> list[str]:
+    return [
+        str(value)
+        for value in [
+            result.get("subject"),
+            result.get("action"),
+            result.get("context"),
+            result.get("title_es"),
+            result.get("description_es"),
+            result.get("visual_description"),
+            result.get("action_description"),
+        ]
+        if value
+    ]
+
+
+def analysis_naming_values(result: dict[str, Any]) -> list[str]:
+    return [
+        str(value)
+        for value in [
+            result.get("title_es"),
+            result.get("description_es"),
+            result.get("subject"),
+            result.get("action"),
+            result.get("context"),
+            result.get("visual_description"),
+            result.get("action_description"),
+        ]
+        if value
+    ]
+
+def is_meaningful_naming_text(value: str | None, *, allow_short: bool = False) -> bool:
+    raw = (value or "").strip()
+    if PurePosixPath(raw).suffix.lower() in {".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp"}:
+        return False
+    slug = clean_semantic_slug(value)
+    if not slug:
+        return False
+    if slug in PLACEHOLDER_NAMING_SLUGS:
+        return False
+    if any(slug.startswith(prefix) for prefix in PLACEHOLDER_NAMING_PREFIXES):
+        return False
+    if any(slug.startswith(prefix) for prefix in NON_SEMANTIC_NAMING_PREFIXES):
+        return False
+    words = slug.split("-")
+    if len(words) < (1 if allow_short else 2):
+        return False
+    if len(words) == 1 and words[0] in TAG_GENERIC_TERMS:
+        return False
+    return True
+
+
+def existing_semantic_stem(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    stem = PurePosixPath(filename).name
+    stem = re.sub(r"__[a-z0-9]+__[a-f0-9]{8}\.[a-z0-9]+$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"\.[a-z0-9]{2,5}$", "", stem, flags=re.IGNORECASE)
+    return stem or None
+
+
+def is_descriptive_spanish_stem(value: str | None) -> bool:
+    slug = clean_semantic_slug(value)
+    words = slug.split("-")
+    if len(words) < 4:
+        return False
+    return any(word in SPANISH_NAMING_TERMS for word in words) or bool(re.search(r"[áéíóúüñ]", value or "", re.I))
+
+
+def candidate_is_less_descriptive(source: str, candidate: str, current: str | None) -> bool:
+    if source not in {"topic", "analysis"}:
+        return False
+    candidate_words = clean_semantic_slug(candidate).split("-")
+    current_words = clean_semantic_slug(current).split("-")
+    return len(candidate_words) <= 3 and len(current_words) >= len(candidate_words) + 3
+
+
+def normalize_naming_text(value: str) -> str:
+    return re.sub(r"\bmanjeando\b", "manejando", value, flags=re.IGNORECASE)
+
+
+def rebuild_reviewed_asset_plan(
+    session: Session,
+    asset: Asset,
+    *,
+    apply: bool,
+    preserve_batch: bool = False,
+) -> ReviewedReplanResult:
+    before = ReviewedReplanResult(
+        dry_run=not apply,
+        file_id=asset.drive_file_id or "",
+        changed=False,
+        skipped_reason=None,
+        target_name_before=asset.target_name,
+        target_name_after=None,
+        target_path_before=asset.remote_path,
+        target_path_after=None,
+        plan_hash_before=asset.plan_hash,
+        plan_hash_after=None,
+        status_before=asset.status,
+        status_after=None,
+        move_status_before=asset.move_status,
+        move_status_after=None,
+    )
+    asset.primary_theme = asset.primary_theme or "otros"
+    asset.primary_topic = asset.primary_topic or "otros"
     request_data = ingest_request_from_asset(asset)
-    classification = Classification(asset.primary_theme, asset.primary_topic, ambiguous=False)
-    batch_number = next_batch_number(
+    classification = reviewed_asset_classification(asset)
+    stored_batch = stored_batch_number(asset)
+    batch_number = stored_batch if preserve_batch and stored_batch is not None else next_batch_number(
         session,
         request_data,
         asset,
@@ -706,24 +1128,170 @@ def approve_review_asset(session: Session, approval: ReviewApproval) -> DriveSta
         requires_review=False,
         asset=asset,
     )
-    target_name = asset.target_name or asset.filename
+    naming_result = reviewed_asset_naming_result(asset)
+    if not semantic_filename_parts(naming_result):
+        return replace(before, skipped_reason="no_meaningful_naming_source")
+    target_name = target_filename(request_data, asset.brand, asset, naming_result)
+    if not valid_target_filename(target_name):
+        return replace(before, skipped_reason="no_meaningful_naming_source")
     target_path = str(PurePosixPath(*target_parts) / target_name)
-    asset.scope = original_scope
+    status_after = "move_planned"
+    move_status_after = "planned"
+    old_path_layout_version = asset.path_layout_version
+    asset.path_layout_version = PATH_LAYOUT_VERSION
+    plan_hash = compute_plan_hash(asset, target_path, target_name, batch_number)
+    asset.path_layout_version = old_path_layout_version
+    changed = (
+        asset.target_name != target_name
+        or asset.remote_path != target_path
+        or asset.plan_hash != plan_hash
+        or asset.status != status_after
+        or asset.move_status != move_status_after
+        or asset.path_layout_version != PATH_LAYOUT_VERSION
+    )
+    result = replace(
+        before,
+        changed=changed,
+        target_name_after=target_name,
+        target_path_after=target_path,
+        plan_hash_after=plan_hash,
+        status_after=status_after,
+        move_status_after=move_status_after,
+    )
+    if not apply:
+        return result
     asset.remote_path = target_path
     asset.source_path = target_path
     asset.target_name = target_name
-    asset.status = "move_planned"
-    asset.move_status = "planned"
+    asset.status = status_after
+    asset.move_status = move_status_after
     asset.needs_human_review = False
     asset.review_reason = None
-    asset.reviewed_at = datetime.now(UTC)
-    asset.reviewed_by = approval.reviewed_by
     asset.path_layout_version = PATH_LAYOUT_VERSION
     asset.plan_version = PLAN_VERSION
     asset.plan_created_at = datetime.now(UTC)
-    asset.plan_hash = compute_plan_hash(asset, target_path, target_name, batch_number)
+    asset.plan_hash = plan_hash
+    return result
+
+
+def replan_reviewed_assets(
+    session: Session,
+    *,
+    apply: bool = False,
+    only_file_id: str | None = None,
+    limit: int = 100,
+) -> list[ReviewedReplanResult]:
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    query = (
+        select(Asset)
+        .where(
+            Asset.drive_file_id.is_not(None),
+            Asset.status == "move_planned",
+            Asset.move_status == "planned",
+            Asset.reviewed_at.is_not(None),
+        )
+        .order_by(Asset.reviewed_at.asc(), Asset.id.asc())
+        .limit(limit)
+    )
+    if only_file_id:
+        query = query.where(Asset.drive_file_id == only_file_id)
+    results = [
+        rebuild_reviewed_asset_plan(session, asset, apply=apply, preserve_batch=True)
+        for asset in session.scalars(query).all()
+    ]
+    if apply:
+        session.commit()
+    else:
+        session.rollback()
+    return results
+
+
+def rename_reviewed_moved_asset(
+    session: Session,
+    drive_client: DriveClient | None,
+    *,
+    file_id: str,
+    apply: bool = False,
+) -> MovedRenameResult:
+    asset = session.scalar(select(Asset).where(Asset.drive_file_id == file_id))
+    if asset is None:
+        raise DriveFileNotFoundError(f"asset not found: {file_id}")
+    if asset.move_status != "moved" or asset.status not in {"ready", "review_required"}:
+        raise ValueError("asset is not a moved Drive asset")
+    if apply and drive_client is None:
+        raise ValueError("drive_client is required when apply=True")
+    metadata = drive_client.get_file_metadata(file_id) if apply and drive_client is not None else None
+    parent_before = (
+        metadata.parents[0]
+        if metadata is not None and metadata.parents
+        else asset.target_parent_id or asset.original_parent_id
+    )
+    plan = rebuild_reviewed_asset_plan(session, asset, apply=False, preserve_batch=True)
+    session.rollback()
+    if plan.skipped_reason:
+        return MovedRenameResult(
+            dry_run=not apply,
+            file_id=file_id,
+            changed=False,
+            skipped_reason=plan.skipped_reason,
+            drive_file_id_before=metadata.id if metadata is not None else asset.drive_file_id,
+            drive_file_id_after=metadata.id if metadata is not None else asset.drive_file_id,
+            parent_before=parent_before,
+            parent_after=parent_before,
+            target_name_before=asset.target_name or (metadata.name if metadata is not None else asset.filename),
+            target_name_after=None,
+            target_path_before=asset.remote_path,
+            target_path_after=None,
+            plan_hash_before=asset.plan_hash,
+            plan_hash_after=None,
+        )
+    target_path_after = plan.target_path_after or asset.remote_path
+    target_name_after = plan.target_name_after or asset.target_name or asset.filename
+    parent_path_before = str(PurePosixPath(asset.remote_path or "").parent)
+    parent_path_after = str(PurePosixPath(target_path_after).parent)
+    skipped_reason = None
+    if parent_path_before != parent_path_after:
+        skipped_reason = "target_parent_path_changed"
+    current_name = metadata.name if metadata is not None else asset.target_name or asset.filename
+    if current_name == target_name_after and not skipped_reason:
+        skipped_reason = "already_named"
+    result = MovedRenameResult(
+        dry_run=not apply,
+        file_id=file_id,
+        changed=skipped_reason is None,
+        skipped_reason=skipped_reason,
+        drive_file_id_before=metadata.id if metadata is not None else asset.drive_file_id,
+        drive_file_id_after=metadata.id if metadata is not None else asset.drive_file_id,
+        parent_before=parent_before,
+        parent_after=parent_before,
+        target_name_before=asset.target_name or current_name,
+        target_name_after=target_name_after,
+        target_path_before=asset.remote_path,
+        target_path_after=target_path_after,
+        plan_hash_before=asset.plan_hash,
+        plan_hash_after=plan.plan_hash_after,
+    )
+    if not apply or skipped_reason is not None:
+        return result
+    assert drive_client is not None
+    updated = drive_client.rename_and_move_file(file_id, target_name_after, parent_before or "", None)
+    verified = drive_client.verify_file_location(file_id, target_name_after, parent_before or "")
+    if not verified:
+        raise MoveError("Drive rename verification failed")
+    asset.filename = updated.name
+    asset.target_name = target_name_after
+    asset.remote_path = target_path_after
+    asset.source_path = target_path_after
+    asset.target_parent_id = parent_before
+    asset.path_layout_version = PATH_LAYOUT_VERSION
+    asset.plan_version = PLAN_VERSION
+    asset.plan_created_at = datetime.now(UTC)
+    asset.plan_hash = plan.plan_hash_after
+    asset.status = "ready"
+    asset.move_status = "moved"
     session.commit()
-    return drive_status_row(asset)
+    return result
 
 
 def update_latest_analysis_tags(session: Session, asset: Asset, tags: list[str]) -> None:
@@ -765,12 +1333,19 @@ def apply_candidates(
     session: Session,
     request_data: BatchRequest,
     scopes: list[BatchScope],
-    listed_by_id: dict[str, tuple[DriveFile, BatchScope]],
 ) -> list[tuple[Asset | None, BatchScope]]:
     scope_by_name = {scope.scope: scope for scope in scopes}
     if request_data.only_file_ids:
         candidates: list[tuple[Asset, BatchScope]] = []
-        for drive_file_id in request_data.only_file_ids[: request_data.max_total]:
+        if len(request_data.only_file_ids) > request_data.max_total:
+            return [
+                (
+                    session.scalar(select(Asset).where(Asset.drive_file_id == drive_file_id)),
+                    BatchScope("", "", ""),
+                )
+                for drive_file_id in request_data.only_file_ids
+            ]
+        for drive_file_id in request_data.only_file_ids:
             asset = session.scalar(select(Asset).where(Asset.drive_file_id == drive_file_id))
             scope_config = scope_by_name.get(asset.scope if asset is not None else "")
             if asset is None or scope_config is None:
@@ -779,17 +1354,29 @@ def apply_candidates(
                 candidates.append((asset, scope_config))
         return candidates
 
-    candidates = []
+    candidates: list[tuple[Asset, BatchScope]] = []
     per_scope: dict[str, int] = {}
-    for drive_file_id, (_drive_file, scope_config) in listed_by_id.items():
+    query = (
+        select(Asset)
+        .where(
+            Asset.drive_file_id.is_not(None),
+            Asset.status == "move_planned",
+            Asset.move_status == "planned",
+            Asset.plan_hash.is_not(None),
+            Asset.target_name.is_not(None),
+            Asset.remote_path.is_not(None),
+        )
+        .order_by(Asset.plan_created_at.asc().nulls_last(), Asset.created_at.asc(), Asset.id.asc())
+    )
+    for asset in session.scalars(query).all():
         if len(candidates) >= request_data.max_total:
             break
+        scope_config = scope_by_name.get(asset.scope or "")
+        if scope_config is None:
+            continue
         if per_scope.get(scope_config.scope, 0) >= request_data.max_per_scope:
             continue
-        asset = session.scalar(select(Asset).where(Asset.drive_file_id == drive_file_id))
-        if asset is None:
-            continue
-        if apply_asset_is_planned(asset) or moved_asset_can_noop(asset):
+        if apply_asset_is_planned(asset):
             candidates.append((asset, scope_config))
             per_scope[scope_config.scope] = per_scope.get(scope_config.scope, 0) + 1
     return candidates
@@ -2691,12 +3278,28 @@ def target_filename(
     if request_data.scope == "generic":
         stem = "-".join(semantic_parts)
     elif request_data.scope == "brand":
-        stem = "-".join(filter(None, [brand.slug if brand else request_data.brand_slug, *semantic_parts]))
+        prefix = brand.slug if brand else request_data.brand_slug
+        semantic_parts = strip_existing_scope_prefix(semantic_parts, prefix)
+        stem = "-".join(filter(None, [prefix, *semantic_parts]))
     else:
-        stem = "-".join(filter(None, [slugify(request_data.title or ""), *semantic_parts]))
+        prefix = slugify(request_data.title or "")
+        semantic_parts = strip_existing_scope_prefix(semantic_parts, prefix)
+        stem = "-".join(filter(None, [prefix, *semantic_parts]))
     stem = trim_semantic_stem(stem, 80) or "asset"
     orientation = compact_orientation(asset.orientation)
     return f"{stem}__{orientation}__{suffix}{ext}"
+
+
+def strip_existing_scope_prefix(parts: list[str], prefix: str | None) -> list[str]:
+    if not parts or not prefix:
+        return parts
+    joined = "-".join(parts)
+    if joined == prefix:
+        return []
+    if joined.startswith(f"{prefix}-"):
+        stripped = joined.removeprefix(f"{prefix}-")
+        return [stripped] if stripped else []
+    return parts
 
 
 def semantic_filename_parts(ai_result: ManagedAIResult) -> list[str]:
@@ -2723,7 +3326,14 @@ def semantic_filename_parts(ai_result: ManagedAIResult) -> list[str]:
     if not allow_gendered:
         fallback_text = neutralize_gendered_terms(fallback_text) or ""
     fallback = clean_semantic_slug(fallback_text)
-    return [fallback] if fallback else ["asset"]
+    if not is_meaningful_naming_text(fallback):
+        return []
+    return [fallback] if fallback else []
+
+
+def valid_target_filename(value: str | None) -> bool:
+    stem = existing_semantic_stem(value)
+    return is_meaningful_naming_text(stem)
 
 
 def usage_policy_for_request(request_data: IngestRequest, ai_result: ManagedAIResult) -> dict[str, Any]:
@@ -3524,13 +4134,13 @@ class GoogleDriveMutationClient:
         new_parent_id: str,
         original_parent_id: str | None = None,
     ) -> DriveFile:
-        if not original_parent_id:
-            raise MoveError("original_parent_id is required for Drive API move")
+        add_parents = new_parent_id if original_parent_id else None
+        remove_parents = original_parent_id or None
         payload = self.service.files().update(
             fileId=file_id,
             body={"name": new_name, "trashed": False},
-            addParents=new_parent_id,
-            removeParents=original_parent_id,
+            addParents=add_parents,
+            removeParents=remove_parents,
             supportsAllDrives=True,
             fields="id,name,parents,trashed,explicitlyTrashed,size,mimeType,modifiedTime,driveId",
         ).execute()

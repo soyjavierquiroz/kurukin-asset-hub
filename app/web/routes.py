@@ -58,6 +58,8 @@ from app.services.managed_drive_pilot import (
     approve_review_asset,
     drive_client_from_environment,
     mutation_client_for_apply,
+    review_approval_has_meaningful_naming_source,
+    update_reviewed_asset_metadata,
 )
 from app.services.long_video_segmentation import (
     approve_segmentation,
@@ -152,6 +154,68 @@ def latest_ai_value(field: str):
 
 def pending_review_filter():
     return or_(Asset.status == "review_required", Asset.needs_human_review.is_(True))
+
+
+VISUAL_PRESENTATION_VALUES = ("masculine", "feminine", "mixed", "unclear", "not_applicable")
+PERSON_VISIBILITY_VALUES = (
+    "clear",
+    "partial",
+    "back_view",
+    "silhouette",
+    "occluded",
+    "not_applicable",
+)
+
+
+def review_approval_from_form(
+    file_id: str,
+    reviewed_by: str,
+    primary_theme: str | None,
+    primary_topic: str | None,
+    tags: str | None,
+    visual_presentation: str,
+    visual_presentation_confidence: float,
+    person_visibility: str,
+    people_count: int | None,
+) -> ReviewApproval:
+    return ReviewApproval(
+        file_id=file_id,
+        primary_theme=clean_text(primary_theme),
+        primary_topic=clean_text(primary_topic),
+        tags=tuple(split.strip() for split in (tags or "").split(",") if split.strip()),
+        reviewed_by=reviewed_by,
+        visual_presentation=visual_presentation,
+        visual_presentation_confidence=visual_presentation_confidence,
+        person_visibility=person_visibility,
+        people_count=people_count,
+    )
+
+
+def review_form_values(
+    ai_result: dict[str, object],
+    asset: Asset,
+    *,
+    primary_theme: str | None = None,
+    primary_topic: str | None = None,
+    tags: str | None = None,
+    visual_presentation: str | None = None,
+    visual_presentation_confidence: float | None = None,
+    person_visibility: str | None = None,
+    people_count: int | None = None,
+) -> dict[str, object]:
+    return {
+        "visual_presentation": visual_presentation or str(ai_result.get("visual_presentation") or "not_applicable"),
+        "visual_presentation_confidence": (
+            visual_presentation_confidence
+            if visual_presentation_confidence is not None
+            else ai_result.get("visual_presentation_confidence", 1.0)
+        ),
+        "person_visibility": person_visibility or str(ai_result.get("person_visibility") or "not_applicable"),
+        "people_count": people_count if people_count is not None else ai_result.get("people_count"),
+        "primary_theme": primary_theme if primary_theme is not None else asset.primary_theme or ai_result.get("primary_theme", ""),
+        "primary_topic": primary_topic if primary_topic is not None else asset.primary_topic or ai_result.get("primary_topic", ""),
+        "tags": tags if tags is not None else ", ".join(str(tag) for tag in ai_result.get("tags", []) or []),
+    }
 
 
 def review_query_base() -> Select[tuple[Asset]]:
@@ -559,6 +623,7 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
         {
             "page_title": asset.filename,
             "asset": asset,
+            "metadata_status": request.query_params.get("metadata_status"),
             "derived_clips": derived_clips,
             "long_video_threshold_seconds": settings.long_video_threshold_seconds,
             "ai_keywords_by_category": dict(ai_keywords_by_category),
@@ -566,6 +631,100 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
             "preview_public_url": preview_public_url,
         },
     )
+
+
+@router.get("/assets/{asset_id}/edit-metadata")
+def assets_edit_metadata(request: Request, asset_id: int, _: AdminUser, session: DbSession):
+    asset = session.scalar(
+        select(Asset)
+        .where(Asset.id == asset_id)
+        .options(selectinload(Asset.ai_analyses))
+    )
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    ai_result = latest_ai_result(asset)
+    return templates.TemplateResponse(
+        request,
+        "assets/edit_metadata.html",
+        {
+            "page_title": f"Editar metadata {asset.filename}",
+            "asset": asset,
+            "ai_result": ai_result,
+            "form_values": review_form_values(ai_result, asset),
+            "validation_error": None,
+            "visual_presentation_values": VISUAL_PRESENTATION_VALUES,
+            "person_visibility_values": PERSON_VISIBILITY_VALUES,
+        },
+    )
+
+
+@router.post("/assets/{asset_id}/edit-metadata")
+def assets_update_metadata(
+    request: Request,
+    asset_id: int,
+    admin_user: AdminUser,
+    session: DbSession,
+    visual_presentation: Annotated[str, Form()],
+    visual_presentation_confidence: Annotated[float, Form()],
+    person_visibility: Annotated[str, Form()],
+    people_count: Annotated[int | None, Form()] = None,
+    primary_theme: Annotated[str | None, Form()] = None,
+    primary_topic: Annotated[str | None, Form()] = None,
+    tags: Annotated[str | None, Form()] = None,
+):
+    asset = session.scalar(
+        select(Asset)
+        .where(Asset.id == asset_id)
+        .options(selectinload(Asset.ai_analyses))
+    )
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    if not asset.drive_file_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing Drive file ID")
+    approval = review_approval_from_form(
+        asset.drive_file_id,
+        admin_user,
+        primary_theme,
+        primary_topic,
+        tags,
+        visual_presentation,
+        visual_presentation_confidence,
+        person_visibility,
+        people_count,
+    )
+    if not review_approval_has_meaningful_naming_source(asset, approval):
+        ai_result = latest_ai_result(asset)
+        return templates.TemplateResponse(
+            request,
+            "assets/edit_metadata.html",
+            {
+                "page_title": f"Editar metadata {asset.filename}",
+                "asset": asset,
+                "ai_result": ai_result,
+                "form_values": review_form_values(
+                    ai_result,
+                    asset,
+                    primary_theme=primary_theme,
+                    primary_topic=primary_topic,
+                    tags=tags,
+                    visual_presentation=visual_presentation,
+                    visual_presentation_confidence=visual_presentation_confidence,
+                    person_visibility=person_visibility,
+                    people_count=people_count,
+                ),
+                "validation_error": "Indica un Primary topic descriptivo para poder aprobar este asset.",
+                "visual_presentation_values": VISUAL_PRESENTATION_VALUES,
+                "person_visibility_values": PERSON_VISIBILITY_VALUES,
+            },
+        )
+    result = update_reviewed_asset_metadata(session, asset, approval)
+    if asset.move_status == "planned":
+        status_value = "planned_recalculated"
+    elif asset.move_status == "moved" and result is not None and result.changed:
+        status_value = "rename_pending"
+    else:
+        status_value = "updated"
+    return redirect_to(f"/assets/{asset_id}?metadata_status={status_value}")
 
 
 @router.post("/assets/{asset_id}/segment")
@@ -773,22 +932,18 @@ def reviews_detail(request: Request, asset_id: int, _: AdminUser, session: DbSes
             "pending_count": pending_count,
             "next_pending_id": next_pending,
             "ai_result": latest_ai_result(asset),
+            "form_values": review_form_values(latest_ai_result(asset), asset),
+            "validation_error": None,
             "preview_public_url": preview_public_url,
-            "visual_presentation_values": ("masculine", "feminine", "mixed", "unclear", "not_applicable"),
-            "person_visibility_values": (
-                "clear",
-                "partial",
-                "back_view",
-                "silhouette",
-                "occluded",
-                "not_applicable",
-            ),
+            "visual_presentation_values": VISUAL_PRESENTATION_VALUES,
+            "person_visibility_values": PERSON_VISIBILITY_VALUES,
         },
     )
 
 
 @router.post("/reviews/{asset_id}")
 def reviews_approve(
+    request: Request,
     asset_id: int,
     admin_user: AdminUser,
     session: DbSession,
@@ -801,26 +956,63 @@ def reviews_approve(
     tags: Annotated[str | None, Form()] = None,
     action: Annotated[str, Form()] = "save",
 ):
-    asset = session.get(Asset, asset_id)
+    asset = session.scalar(
+        select(Asset)
+        .where(Asset.id == asset_id)
+        .options(selectinload(Asset.ai_analyses))
+    )
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
     if not asset.drive_file_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing Drive file ID")
-    try:
-        approve_review_asset(
-            session,
-            ReviewApproval(
-                file_id=asset.drive_file_id,
-                primary_theme=clean_text(primary_theme),
-                primary_topic=clean_text(primary_topic),
-                tags=tuple(split.strip() for split in (tags or "").split(",") if split.strip()),
-                reviewed_by=admin_user,
-                visual_presentation=visual_presentation,
-                visual_presentation_confidence=visual_presentation_confidence,
-                person_visibility=person_visibility,
-                people_count=people_count,
-            ),
+    approval = review_approval_from_form(
+        asset.drive_file_id,
+        admin_user,
+        primary_theme,
+        primary_topic,
+        tags,
+        visual_presentation,
+        visual_presentation_confidence,
+        person_visibility,
+        people_count,
+    )
+    if not review_approval_has_meaningful_naming_source(asset, approval):
+        pending_count = session.scalar(select(func.count()).select_from(Asset).where(pending_review_filter())) or 0
+        next_pending = session.scalar(
+            select(Asset.id)
+            .where(pending_review_filter(), Asset.id != asset.id)
+            .order_by(Asset.created_at.asc(), Asset.id.asc())
+            .limit(1)
         )
+        ai_result = latest_ai_result(asset)
+        return templates.TemplateResponse(
+            request,
+            "reviews/form.html",
+            {
+                "page_title": f"Review {asset.filename}",
+                "asset": asset,
+                "pending_count": pending_count,
+                "next_pending_id": next_pending,
+                "ai_result": ai_result,
+                "form_values": review_form_values(
+                    ai_result,
+                    asset,
+                    primary_theme=primary_theme,
+                    primary_topic=primary_topic,
+                    tags=tags,
+                    visual_presentation=visual_presentation,
+                    visual_presentation_confidence=visual_presentation_confidence,
+                    person_visibility=person_visibility,
+                    people_count=people_count,
+                ),
+                "validation_error": "Indica un Primary topic descriptivo para poder aprobar este asset.",
+                "preview_public_url": preview_public_url,
+                "visual_presentation_values": VISUAL_PRESENTATION_VALUES,
+                "person_visibility_values": PERSON_VISIBILITY_VALUES,
+            },
+        )
+    try:
+        approve_review_asset(session, approval)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if action == "save_next":

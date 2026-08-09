@@ -30,8 +30,11 @@ from app.services.managed_drive_pilot import (
     list_drive_status,
     list_review_required_assets,
     migrate_legacy_layout_assets,
+    mutation_client_for_apply,
     preflight_drive_access,
+    rename_reviewed_moved_asset,
     release_batch_lock,
+    replan_reviewed_assets,
     run_drive_batch,
     approve_review_asset,
 )
@@ -70,6 +73,23 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--max-per-scope", type=int, default=25)
     batch.add_argument("--concurrency", type=int, default=1)
     batch.add_argument("--only-file-id", action="append", default=[])
+
+    replan_reviewed = drive_subparsers.add_parser(
+        "replan-reviewed",
+        parents=[common],
+        description="Recalculate persisted plans for human-approved planned assets without moving Drive files.",
+    )
+    replan_reviewed.add_argument("--apply", action="store_true")
+    replan_reviewed.add_argument("--only-file-id")
+    replan_reviewed.add_argument("--limit", type=int, default=100)
+
+    rename_reviewed = drive_subparsers.add_parser(
+        "rename-reviewed",
+        parents=[common],
+        description="Rename one moved reviewed Drive asset in place after recalculating its human-approved filename.",
+    )
+    rename_reviewed.add_argument("--apply", action="store_true")
+    rename_reviewed.add_argument("--only-file-id", required=True)
 
     status = drive_subparsers.add_parser("status", parents=[common])
     status.add_argument("--status", choices=["ready", "move_planned", "review_required", "failed"])
@@ -173,6 +193,32 @@ def handle_drive(args: argparse.Namespace, session: Session) -> int:
     if args.action == "status":
         result = list_drive_status(session, status=args.status, scope=args.scope, limit=args.limit)
         output(args, result.to_dict(), status_lines(result.to_dict()))
+        return EXIT_SUCCESS
+    if args.action == "replan-reviewed":
+        results = replan_reviewed_assets(
+            session,
+            apply=args.apply,
+            only_file_id=args.only_file_id,
+            limit=args.limit,
+        )
+        data = {
+            "dry_run": not args.apply,
+            "assets_checked": len(results),
+            "assets_changed": sum(1 for result in results if result.changed),
+            "assets": [result.to_dict() for result in results],
+        }
+        output(args, data, replan_lines(data))
+        return EXIT_SUCCESS
+    if args.action == "rename-reviewed":
+        drive_client = mutation_client_for_repair() if args.apply else None
+        result = rename_reviewed_moved_asset(
+            session,
+            drive_client,
+            file_id=args.only_file_id,
+            apply=args.apply,
+        )
+        data = result.to_dict()
+        output(args, data, rename_lines(data))
         return EXIT_SUCCESS
     if args.action == "review":
         return handle_review(args, session)
@@ -334,6 +380,8 @@ def current_database_name(session: Session) -> str:
 def mutating_command(args: argparse.Namespace) -> bool:
     if args.action == "batch":
         return bool(args.apply)
+    if args.action in {"replan-reviewed", "rename-reviewed"}:
+        return bool(getattr(args, "apply", False))
     if args.action == "review":
         return getattr(args, "review_action", "") == "approve"
     if args.action == "layout":
@@ -479,6 +527,7 @@ def batch_lines(data: dict[str, Any]) -> list[str]:
         f"RUN_MODE={data['run_mode']}",
         f"LOCK={data['lock']}",
         f"FILES_DISCOVERED={data['files_discovered']}",
+        f"PLANS_SELECTED={data.get('plans_selected', 0)}",
         f"FILES_NEW={data['files_new']}",
         f"FILES_ANALYZED={data['files_analyzed']}",
         f"FILES_APPLIED={data['files_applied']}",
@@ -532,6 +581,51 @@ def layout_lines(data: dict[str, Any]) -> list[str]:
         f"DRIVE_MUTATIONS={data['drive_mutations']}",
         f"DUPLICATES={data['duplicates']}",
     ]
+
+
+def replan_lines(data: dict[str, Any]) -> list[str]:
+    lines = [
+        f"DRY_RUN={'YES' if data['dry_run'] else 'NO'}",
+        f"ASSETS_CHECKED={data['assets_checked']}",
+        f"ASSETS_CHANGED={data['assets_changed']}",
+    ]
+    for row in data["assets"]:
+        lines.append(
+            "\t".join(
+                str(row.get(key) or "")
+                for key in (
+                    "file_id",
+                    "changed",
+                    "skipped_reason",
+                    "target_name_before",
+                    "target_name_after",
+                    "target_path_before",
+                    "target_path_after",
+                    "plan_hash_before",
+                    "plan_hash_after",
+                )
+            )
+        )
+    return lines
+
+
+def rename_lines(data: dict[str, Any]) -> list[str]:
+    return [
+        f"DRY_RUN={'YES' if data['dry_run'] else 'NO'}",
+        f"FILE_ID={data['file_id']}",
+        f"CHANGED={'YES' if data['changed'] else 'NO'}",
+        f"SKIPPED_REASON={data['skipped_reason'] or ''}",
+        f"PARENT_BEFORE={data['parent_before'] or ''}",
+        f"PARENT_AFTER={data['parent_after'] or ''}",
+        f"TARGET_NAME_BEFORE={data['target_name_before'] or ''}",
+        f"TARGET_NAME_AFTER={data['target_name_after'] or ''}",
+        f"TARGET_PATH_BEFORE={data['target_path_before'] or ''}",
+        f"TARGET_PATH_AFTER={data['target_path_after'] or ''}",
+    ]
+
+
+def mutation_client_for_repair():
+    return mutation_client_for_apply(drive_client_from_environment())
 
 
 def split_tags(value: str | None) -> list[str]:
