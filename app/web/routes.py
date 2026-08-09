@@ -109,7 +109,10 @@ def build_query_string(params: dict[str, object]) -> str:
 def bool_filter(value: str | bool | None) -> bool | None:
     if isinstance(value, bool):
         return value
-    if value is None or value == "":
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "":
         return None
     return value.lower() in {"1", "true", "yes", "on"}
 
@@ -300,16 +303,19 @@ def assets_index(
     person_visibility: str | None = None,
     keyword: str | None = None,
     usage_scope: str | None = None,
-    auto_select_enabled: bool | None = None,
+    auto_select_enabled: str | None = None,
     ai_status: str | None = None,
-    needs_review: bool | None = None,
-    needs_human_review: bool | None = None,
+    needs_review: str | None = None,
+    needs_human_review: str | None = None,
     sort: str = "newest",
     page: int = 1,
 ):
     page = max(page, 1)
     per_page = 48
-    review_filter = needs_human_review if needs_human_review is not None else needs_review
+    auto_select_filter = bool_filter(auto_select_enabled)
+    human_review_filter = bool_filter(needs_human_review)
+    legacy_review_filter = bool_filter(needs_review)
+    review_filter = human_review_filter if human_review_filter is not None else legacy_review_filter
     people_filter = bool_filter(contains_people)
     filters = build_asset_filters(
         q=q,
@@ -322,7 +328,7 @@ def assets_index(
         keyword=keyword,
         usage_scope=usage_scope,
         scope=scope,
-        auto_select_enabled=auto_select_enabled,
+        auto_select_enabled=auto_select_filter,
         ai_status=ai_status,
         needs_review=review_filter,
         primary_theme=primary_theme,
@@ -381,7 +387,7 @@ def assets_index(
                 "person_visibility": person_visibility or "",
                 "keyword": keyword or "",
                 "usage_scope": usage_scope or "",
-                "auto_select_enabled": auto_select_enabled,
+                "auto_select_enabled": auto_select_filter,
                 "ai_status": ai_status or "",
                 "needs_review": review_filter,
                 "needs_human_review": review_filter,
@@ -427,7 +433,7 @@ def assets_index(
                     "person_visibility": person_visibility,
                     "keyword": keyword,
                     "usage_scope": usage_scope,
-                    "auto_select_enabled": auto_select_enabled,
+                    "auto_select_enabled": auto_select_filter,
                     "ai_status": ai_status,
                     "needs_human_review": review_filter,
                     "sort": sort,

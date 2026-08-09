@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.db import Base, get_db_session
 from app.main import create_app
 from app.models import Asset, AssetAIAnalysis, AssetTag, Source
+from app.web.routes import bool_filter
 
 
 def auth_header() -> dict[str, str]:
@@ -197,6 +198,123 @@ def test_assets_pagination_preserves_parameters(tmp_path: Path, monkeypatch) -> 
     assert "media_type=video" in response.text
     assert "sort=filename" in response.text
     assert "page=2" in response.text
+
+
+def test_assets_boolean_filters_accept_empty_values(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    needs_human_review = client.get("/assets?needs_human_review=", headers=auth_header())
+    combined_empty = client.get("/assets?contains_people=&needs_human_review=", headers=auth_header())
+    auto_select_empty = client.get("/assets?auto_select_enabled=", headers=auth_header())
+
+    assert needs_human_review.status_code == 200
+    assert combined_empty.status_code == 200
+    assert auto_select_empty.status_code == 200
+
+
+def test_assets_problematic_empty_filter_url_returns_html(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    response = client.get(
+        "/assets?q=yoga&status=&move_status=&scope=&media_type=&primary_theme=&orientation="
+        "&contains_people=&visual_presentation=&person_visibility=&needs_human_review=&sort=newest",
+        headers=auth_header(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Assets" in response.text
+    assert "bool_parsing" not in response.text
+
+
+def test_assets_needs_human_review_filters_true_false_and_legacy_alias(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    true_response = client.get("/assets?needs_human_review=true", headers=auth_header())
+    false_response = client.get("/assets?needs_human_review=false", headers=auth_header())
+    legacy_response = client.get("/assets?needs_review=true", headers=auth_header())
+
+    assert true_response.status_code == 200
+    assert "asset-0.mp4" in true_response.text
+    assert "asset-1.mp4" not in true_response.text
+    assert false_response.status_code == 200
+    assert "asset-1.mp4" in false_response.text
+    assert "asset-0.mp4" not in false_response.text
+    assert legacy_response.status_code == 200
+    assert "asset-0.mp4" in legacy_response.text
+    assert "asset-1.mp4" not in legacy_response.text
+
+
+def test_assets_needs_human_review_takes_precedence_over_legacy_alias(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    response = client.get("/assets?needs_review=false&needs_human_review=true", headers=auth_header())
+
+    assert response.status_code == 200
+    assert "asset-0.mp4" in response.text
+    assert "asset-1.mp4" not in response.text
+
+
+def test_assets_contains_people_filters_true_false(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=3)
+    client = TestClient(app)
+
+    true_response = client.get("/assets?contains_people=true", headers=auth_header())
+    false_response = client.get("/assets?contains_people=false", headers=auth_header())
+
+    assert true_response.status_code == 200
+    assert "asset-0.mp4" in true_response.text
+    assert "asset-1.mp4" not in true_response.text
+    assert false_response.status_code == 200
+    assert "asset-1.mp4" in false_response.text
+    assert "asset-0.mp4" not in false_response.text
+
+
+def test_assets_boolean_pagination_preserves_active_true_false_values(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_assets(session_factory, count=55)
+    client = TestClient(app)
+
+    response = client.get(
+        "/assets?contains_people=false&needs_human_review=false&sort=filename",
+        headers=auth_header(),
+    )
+
+    assert response.status_code == 200
+    assert "contains_people=false" in response.text
+    assert "needs_human_review=false" in response.text
+    assert "sort=filename" in response.text
+    assert "page=2" in response.text
+
+
+def test_bool_filter_strips_string_values() -> None:
+    assert bool_filter(" true ") is True
+    assert bool_filter(" FALSE ") is False
+    assert bool_filter("  ") is None
 
 
 def test_assets_empty_result_state(tmp_path: Path, monkeypatch) -> None:
