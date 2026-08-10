@@ -2,12 +2,13 @@ import secrets
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import and_, exists, false, func, or_, select
+from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import String, and_, cast, exists, false, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.db import get_db_session
-from app.models import Asset, AssetAllowedBrand, Brand, Niche, Product
+from app.models import Asset, AssetAIAnalysis, AssetAllowedBrand, AssetKeyword, AssetTag, Brand, Niche, Product
 from app.models.asset import ORIENTATION_VALUES, USAGE_SCOPE_VALUES
 from app.schemas.asset_selection import AssetSelectionRequest, AssetSelectionResponse
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
@@ -17,6 +18,41 @@ from app.services.asset_search import asset_matches_people_query, score_asset_fo
 from app.services.asset_selection import select_assets
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
+
+
+class AssetSourcePolicySource(BaseModel):
+    scope: str
+    brand: str | None = None
+    title: str | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "AssetSourcePolicySource":
+        if self.scope not in {"generic", "brand", "title"}:
+            raise ValueError(f"Invalid scope: {self.scope}")
+        if self.scope == "brand" and not clean_json_value(self.brand):
+            raise ValueError("brand source requires brand")
+        if self.scope == "title" and not clean_json_value(self.title):
+            raise ValueError("title source requires title")
+        self.brand = clean_json_value(self.brand)
+        self.title = clean_json_value(self.title)
+        return self
+
+
+class AssetSourcePolicy(BaseModel):
+    sources: list[AssetSourcePolicySource] = Field(min_length=1)
+
+
+class AssetJsonSearchRequest(BaseModel):
+    query: str | None = None
+    limit: int = Field(default=20, ge=1, le=200)
+    source_policy: AssetSourcePolicy | None = None
+
+
+def clean_json_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 def require_asset_hub_api_key(
@@ -207,6 +243,72 @@ def search_assets(
     }
 
 
+@router.post("/search")
+def search_assets_json(
+    request: AssetJsonSearchRequest,
+    _: Annotated[None, Depends(require_asset_hub_api_key)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> dict[str, Any]:
+    source_policy = request.source_policy or AssetSourcePolicy(
+        sources=[AssetSourcePolicySource(scope="generic")]
+    )
+    tokens = tokenize_query(request.query)
+    filters = [
+        usable_production_asset_filter(),
+        source_policy_filter(source_policy),
+    ]
+    text_filter = json_text_search_filter(request.query)
+    if text_filter is not None:
+        filters.append(text_filter)
+
+    candidate_limit = max(request.limit * 20, 200)
+    query = (
+        select(Asset)
+        .where(and_(*filters))
+        .options(
+            selectinload(Asset.source),
+            selectinload(Asset.brand),
+            selectinload(Asset.product),
+            selectinload(Asset.niches),
+            selectinload(Asset.tags),
+            selectinload(Asset.keywords),
+            selectinload(Asset.ai_analyses),
+        )
+        .order_by(
+            func.coalesce(Asset.quality_score, 0).desc(),
+            func.coalesce(Asset.ai_enrichment_confidence, 0).desc(),
+            Asset.usage_count.asc(),
+            Asset.id.desc(),
+        )
+        .limit(candidate_limit)
+    )
+
+    scored_assets: list[tuple[Asset, float]] = []
+    for asset in session.scalars(query).all():
+        score = score_asset_for_query(asset, tokens)
+        if tokens and score <= 0:
+            continue
+        scored_assets.append((asset, score))
+
+    scored_assets.sort(
+        key=lambda item: (
+            item[1],
+            item[0].quality_score or 0,
+            item[0].ai_enrichment_confidence or 0,
+            item[0].id,
+        ),
+        reverse=True,
+    )
+    scored_assets = scored_assets[: request.limit]
+
+    return {
+        "query": request.query,
+        "source_policy": source_policy.model_dump(),
+        "count": len(scored_assets),
+        "assets": [serialize_money_printer_asset(asset) for asset, _score in scored_assets],
+    }
+
+
 @router.post("/select", response_model=AssetSelectionResponse)
 def api_select_assets(
     request: AssetSelectionRequest,
@@ -253,6 +355,66 @@ def eligible_base_filter():
     )
 
 
+def usable_production_asset_filter():
+    return and_(
+        Asset.status.in_(("ready", "moved")),
+        Asset.move_status == "moved",
+        or_(
+            Asset.source_status.is_(None),
+            Asset.source_status.not_in(("missing", "inaccessible", "deleted")),
+        ),
+        Asset.usage_scope != "restricted",
+        Asset.auto_select_enabled.is_(True),
+        Asset.rights_status != "restricted",
+    )
+
+
+def source_policy_filter(source_policy: AssetSourcePolicy):
+    filters = []
+    for source in source_policy.sources:
+        if source.scope == "generic":
+            filters.append(Asset.scope == "generic")
+        elif source.scope == "brand":
+            filters.append(and_(Asset.scope == "brand", Asset.brand.has(Brand.slug == source.brand)))
+        elif source.scope == "title":
+            filters.append(and_(Asset.scope == "title", Asset.title_slug == source.title))
+    return or_(*filters) if filters else false()
+
+
+def json_text_search_filter(q: str | None):
+    raw_query = clean_json_value(q)
+    if not raw_query:
+        return None
+    tokens = tokenize_query(raw_query)
+    if not tokens:
+        return None
+    token_filters = []
+    for token in tokens:
+        like = f"%{token}%"
+        token_filters.append(
+            or_(
+                Asset.filename.ilike(like),
+                Asset.original_name.ilike(like),
+                Asset.target_name.ilike(like),
+                Asset.title.ilike(like),
+                Asset.title_name.ilike(like),
+                Asset.description.ilike(like),
+                Asset.visual_description.ilike(like),
+                Asset.action_description.ilike(like),
+                Asset.primary_theme.ilike(like),
+                Asset.primary_topic.ilike(like),
+                Asset.search_text.ilike(like),
+                Asset.embedding_text.ilike(like),
+                Asset.brand.has(or_(Brand.slug.ilike(like), Brand.name.ilike(like))),
+                Asset.product.has(or_(Product.slug.ilike(like), Product.name.ilike(like))),
+                Asset.tags.any(AssetTag.tag.ilike(like)),
+                Asset.keywords.any(AssetKeyword.keyword.ilike(like)),
+                Asset.ai_analyses.any(cast(AssetAIAnalysis.result_json, String).ilike(like)),
+            )
+        )
+    return and_(*token_filters)
+
+
 def allowed_brand_exists(brand: Brand):
     return exists(
         select(AssetAllowedBrand.asset_id).where(
@@ -260,6 +422,26 @@ def allowed_brand_exists(brand: Brand):
             AssetAllowedBrand.brand_id == brand.id,
         )
     )
+
+
+def serialize_money_printer_asset(asset: Asset) -> dict[str, Any]:
+    return {
+        "asset_id": asset.asset_uid,
+        "drive_file_id": asset.drive_file_id,
+        "scope": asset.scope,
+        "brand": asset.brand.slug if asset.scope == "brand" and asset.brand else None,
+        "collection": asset.collection,
+        "title_type": asset.title_type if asset.scope == "title" else None,
+        "title": asset.title_name if asset.scope == "title" else None,
+        "title_context": asset.title,
+        "filename": asset.filename,
+        "target_path": asset.remote_path,
+        "media_type": asset.type,
+        "orientation": asset.orientation,
+        "primary_theme": asset.primary_theme,
+        "primary_topic": asset.primary_topic,
+        "tags": [tag.tag for tag in asset.tags],
+    }
 
 
 def serialize_asset(asset: Asset, score: float | None = None) -> dict[str, Any]:

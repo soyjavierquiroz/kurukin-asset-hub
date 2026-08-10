@@ -687,3 +687,397 @@ def test_managed_title_filter_does_not_mix_titles() -> None:
 
     assert "asset-global-video" in uids
     assert "asset-global-audio" not in uids
+
+
+def seed_money_printer_assets(session: Session) -> None:
+    source = Source(source_id="managed-drive", provider="google_drive", label="Managed Drive")
+    grandiosa = Brand(slug="grandiosa-mujer", name="Grandiosa Mujer")
+    other_brand = Brand(slug="otra-marca", name="Otra Marca")
+    session.add_all([source, grandiosa, other_brand])
+    session.flush()
+
+    assets = [
+        make_money_printer_asset(
+            source,
+            uid="generic-ready",
+            filename="mujer_telefono_generic.mp4",
+            scope="generic",
+            search_text="mujer hablando por telefono generic",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="generic-mirror",
+            filename="mujer_espejo_generic.mp4",
+            scope="generic",
+            search_text="mujer maquillandose frente al espejo",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="brand-grandiosa",
+            filename="grandiosa_mujer_espejo.mp4",
+            scope="brand",
+            brand=grandiosa,
+            search_text="mujer maquillandose frente al espejo grandiosa",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="brand-other",
+            filename="otra_marca_espejo.mp4",
+            scope="brand",
+            brand=other_brand,
+            search_text="mujer maquillandose frente al espejo otra marca",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="title-mi-otra-yo",
+            filename="mi_otra_yo_telefono.mp4",
+            scope="title",
+            title_name="Mi Otra Yo",
+            title_slug="mi-otra-yo",
+            title_type="series",
+            search_text="mujer hablando por telefono mi otra yo",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="title-other",
+            filename="otro_titulo_telefono.mp4",
+            scope="title",
+            title_name="Otro Titulo",
+            title_slug="otro-titulo",
+            title_type="series",
+            search_text="mujer hablando por telefono otro titulo",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="planned-generic",
+            filename="planned_generic.mp4",
+            scope="generic",
+            status="move_planned",
+            move_status="planned",
+            search_text="mujer hablando por telefono planned",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="review-generic",
+            filename="review_generic.mp4",
+            scope="generic",
+            status="review_required",
+            search_text="mujer hablando por telefono review",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="failed-generic",
+            filename="failed_generic.mp4",
+            scope="generic",
+            status="failed",
+            move_status="move_failed",
+            search_text="mujer hablando por telefono failed",
+        ),
+        make_money_printer_asset(
+            source,
+            uid="moved-status-generic",
+            filename="moved_status_generic.mp4",
+            scope="generic",
+            status="moved",
+            search_text="mujer hablando por telefono moved",
+        ),
+    ]
+    for asset in (assets[1], assets[2], assets[3]):
+        asset.primary_topic = "espejo"
+    assets[0].keywords.append(AssetKeyword(keyword="telefono", category="object", weight=1.0, confidence=1.0))
+    assets[0].keywords[0].source = "test"
+    session.add_all(assets)
+    session.commit()
+
+
+def make_money_printer_asset(
+    source: Source,
+    *,
+    uid: str,
+    filename: str,
+    scope: str,
+    search_text: str,
+    brand: Brand | None = None,
+    title_name: str | None = None,
+    title_slug: str | None = None,
+    title_type: str | None = None,
+    status: str = "ready",
+    move_status: str = "moved",
+) -> Asset:
+    return Asset(
+        asset_uid=uid,
+        source=source,
+        provider="google_drive",
+        remote_path=f"30_assets/{filename}",
+        drive_file_id=f"drive-{uid}",
+        filename=filename,
+        type="video",
+        scope=scope,
+        brand=brand,
+        title_name=title_name,
+        title_slug=title_slug,
+        title_type=title_type,
+        title=f"contexto {uid}",
+        status=status,
+        move_status=move_status,
+        usage_scope="global",
+        rights_status="owned",
+        auto_select_enabled=True,
+        orientation="9:16",
+        primary_theme="personas",
+        primary_topic="telefono",
+        search_text=search_text,
+    )
+
+
+def post_money_printer_search(
+    client: TestClient,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    response = client.post("/api/assets/search", json=payload, headers=API_HEADERS)
+    assert response.status_code == 200
+    return response.json()
+
+
+def money_printer_asset_ids(response_json: dict[str, object]) -> set[str]:
+    assets = response_json["assets"]
+    assert isinstance(assets, list)
+    return {asset["asset_id"] for asset in assets}
+
+
+def test_money_printer_default_returns_only_generic() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "mujer telefono", "limit": 20})
+
+    assert money_printer_asset_ids(result) == {"generic-ready", "moved-status-generic"}
+    assert result["source_policy"] == {"sources": [{"scope": "generic", "brand": None, "title": None}]}
+
+
+def test_money_printer_strict_brand_does_not_mix_generic() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(
+        client,
+        {
+            "query": "mujer espejo",
+            "source_policy": {"sources": [{"scope": "brand", "brand": "grandiosa-mujer"}]},
+        },
+    )
+
+    assert money_printer_asset_ids(result) == {"brand-grandiosa"}
+
+
+def test_money_printer_strict_brand_does_not_mix_other_brand() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(
+        client,
+        {
+            "query": "mujer espejo",
+            "source_policy": {"sources": [{"scope": "brand", "brand": "grandiosa-mujer"}]},
+        },
+    )
+
+    assert "brand-other" not in money_printer_asset_ids(result)
+
+
+def test_money_printer_strict_title_does_not_mix_generic() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(
+        client,
+        {
+            "query": "mujer telefono",
+            "source_policy": {"sources": [{"scope": "title", "title": "mi-otra-yo"}]},
+        },
+    )
+
+    assert money_printer_asset_ids(result) == {"title-mi-otra-yo"}
+
+
+def test_money_printer_strict_title_does_not_mix_other_title() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(
+        client,
+        {
+            "query": "mujer telefono",
+            "source_policy": {"sources": [{"scope": "title", "title": "mi-otra-yo"}]},
+        },
+    )
+
+    assert "title-other" not in money_printer_asset_ids(result)
+
+
+def test_money_printer_generic_plus_title_returns_both() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(
+        client,
+        {
+            "query": "mujer telefono",
+            "source_policy": {
+                "sources": [{"scope": "generic"}, {"scope": "title", "title": "mi-otra-yo"}]
+            },
+        },
+    )
+
+    assert money_printer_asset_ids(result) == {
+        "generic-ready",
+        "moved-status-generic",
+        "title-mi-otra-yo",
+    }
+
+
+def test_money_printer_generic_plus_brand_returns_both() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(
+        client,
+        {
+            "query": "mujer espejo",
+            "source_policy": {
+                "sources": [{"scope": "generic"}, {"scope": "brand", "brand": "grandiosa-mujer"}]
+            },
+        },
+    )
+
+    assert money_printer_asset_ids(result) == {"generic-mirror", "brand-grandiosa"}
+
+
+def test_money_printer_empty_source_policy_errors() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    response = client.post(
+        "/api/assets/search",
+        json={"source_policy": {"sources": []}},
+        headers=API_HEADERS,
+    )
+
+    assert response.status_code == 422
+
+
+def test_money_printer_brand_source_requires_brand() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    response = client.post(
+        "/api/assets/search",
+        json={"source_policy": {"sources": [{"scope": "brand"}]}},
+        headers=API_HEADERS,
+    )
+
+    assert response.status_code == 422
+
+
+def test_money_printer_title_source_requires_title() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    response = client.post(
+        "/api/assets/search",
+        json={"source_policy": {"sources": [{"scope": "title"}]}},
+        headers=API_HEADERS,
+    )
+
+    assert response.status_code == 422
+
+
+def test_money_printer_unknown_scope_errors() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    response = client.post(
+        "/api/assets/search",
+        json={"source_policy": {"sources": [{"scope": "global"}]}},
+        headers=API_HEADERS,
+    )
+
+    assert response.status_code == 422
+
+
+def test_money_printer_text_search_stays_inside_allowed_universe() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(
+        client,
+        {
+            "query": "grandiosa",
+            "source_policy": {"sources": [{"scope": "brand", "brand": "grandiosa-mujer"}]},
+        },
+    )
+
+    assert money_printer_asset_ids(result) == {"brand-grandiosa"}
+
+
+def test_money_printer_planned_does_not_appear() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "planned", "limit": 20})
+
+    assert "planned-generic" not in money_printer_asset_ids(result)
+
+
+def test_money_printer_review_required_does_not_appear() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "review", "limit": 20})
+
+    assert "review-generic" not in money_printer_asset_ids(result)
+
+
+def test_money_printer_failed_does_not_appear() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "failed", "limit": 20})
+
+    assert "failed-generic" not in money_printer_asset_ids(result)
+
+
+def test_money_printer_ready_and_moved_appear() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "mujer telefono", "limit": 20})
+
+    assert {"generic-ready", "moved-status-generic"}.issubset(money_printer_asset_ids(result))
+
+
+def test_money_printer_limit_is_respected() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "mujer telefono", "limit": 1})
+
+    assert result["count"] == 1
+    assert len(result["assets"]) == 1
