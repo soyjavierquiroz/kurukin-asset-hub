@@ -81,6 +81,9 @@ def test_batch_request_defaults_are_unchanged() -> None:
     assert request.concurrency == 1
     assert request.nvidia_pause_seconds == 0.75
     assert request.only_file_ids == ()
+    assert request.scope is None
+    assert request.brand_slug is None
+    assert request.title_slug is None
 
 
 def test_managed_ai_result_construction_and_serialization_are_unchanged() -> None:

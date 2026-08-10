@@ -278,6 +278,10 @@ def test_primary_topic_allows_two_words() -> None:
     assert valid_primary_topic("análisis financiero")
 
 
+def test_primary_topic_allows_one_word() -> None:
+    assert valid_primary_topic("videojuegos")
+
+
 def test_primary_topic_rejects_more_than_eight_words() -> None:
     assert not valid_primary_topic("uno dos tres cuatro cinco seis siete ocho nueve")
 

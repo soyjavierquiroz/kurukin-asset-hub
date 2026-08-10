@@ -74,8 +74,8 @@ class NvidiaReducedAssetResult(BaseModel):
     def validate_primary_topic(cls, value: str) -> str:
         topic = normalize_primary_topic(value)
         word_count = len(topic.split())
-        if word_count < 2 or word_count > 8:
-            raise ValueError("primary_topic must have 2 to 8 words")
+        if word_count < 1 or word_count > 8:
+            raise ValueError("primary_topic must have 1 to 8 words")
         return topic
 
 
@@ -168,7 +168,7 @@ def build_reduced_prompt(base_prompt: str) -> str:
         "Reglas:\n"
         "- Todo texto libre en espanol neutro.\n"
         "- primary_theme debe ser exactamente uno de los valores permitidos.\n"
-        "- primary_topic debe tener entre 2 y 8 palabras, ser especifico y servir luego como slug de ruta.\n"
+        "- primary_topic debe tener entre 1 y 8 palabras, ser especifico y servir luego como slug de ruta.\n"
         "- tags debe contener entre 5 y 10 etiquetas utiles en espanol, minusculas, sin duplicados y sin terminos genericos como video, archivo, escena o imagen.\n"
         "- visual_presentation representa presentacion visual aparente, no identidad de genero.\n"
         "- visual_presentation debe ser masculine, feminine, mixed, unclear o not_applicable.\n"

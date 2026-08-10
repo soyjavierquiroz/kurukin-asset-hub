@@ -145,6 +145,9 @@ class BatchRequest:
     concurrency: int = 1
     nvidia_pause_seconds: float = 0.75
     only_file_ids: tuple[str, ...] = ()
+    scope: str | None = None
+    brand_slug: str | None = None
+    title_slug: str | None = None
 
 
 @dataclass(frozen=True)

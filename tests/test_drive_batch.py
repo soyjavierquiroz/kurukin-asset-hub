@@ -49,20 +49,35 @@ class BatchFakeDrive:
             "root": folder("root", []),
             "generic-inbox": folder("generic-inbox", ["root"]),
             "brand-inbox": folder("brand-inbox", ["root"]),
+            "brand-grandiosa-mujer-inbox": folder(
+                "brand-grandiosa-mujer-inbox",
+                ["brand-inbox"],
+                name="grandiosa-mujer",
+            ),
             "title-inbox": folder("title-inbox", ["root"]),
+            "title-mi-otra-yo-inbox": folder(
+                "title-mi-otra-yo-inbox",
+                ["title-inbox"],
+                name="mi-otra-yo",
+            ),
         }
         for scope, folder_id in (
             ("generic", "generic-inbox"),
             ("brand", "brand-inbox"),
             ("title", "title-inbox"),
         ):
+            parents = [folder_id]
+            if scope == "brand":
+                parents.append("brand-grandiosa-mujer-inbox")
+            if scope == "title":
+                parents.append("title-mi-otra-yo-inbox")
             for index in range(1, counts.get(scope, 0) + 1):
                 file_id = f"{scope}-{index}"
                 self.files[file_id] = DriveFile(
                     id=file_id,
                     name=f"{scope}-{index}.mp4",
                     mime_type="video/mp4",
-                    parents=[folder_id],
+                    parents=parents,
                     size=100 + index,
                     modified_time=datetime(2026, 8, 3, tzinfo=UTC),
                     capabilities={"canEdit": True, "canMoveItemWithinDrive": True, "canUntrash": True},
@@ -71,13 +86,27 @@ class BatchFakeDrive:
         self.moves: list[tuple[str, str, str]] = []
         self.created_folders: list[tuple[str, str]] = []
         self.list_calls: list[tuple[str, int]] = []
+        self.find_child_folder_calls: list[tuple[str, str]] = []
+        self.metadata_calls: list[str] = []
         self.fail_move = fail_move
 
     def list_folder(self, folder_id: str, limit: int) -> list[DriveFile]:
         self.list_calls.append((folder_id, limit))
-        return [item for item in self.files.values() if folder_id in item.parents and not item.is_folder][:limit]
+        return [
+            item.__class__(**{**item.__dict__, "parents": [folder_id]})
+            for item in self.files.values()
+            if folder_id in item.parents and not item.is_folder
+        ][:limit]
+
+    def find_child_folder_id(self, parent_id: str, name: str) -> str | None:
+        self.find_child_folder_calls.append((parent_id, name))
+        for item in self.files.values():
+            if item.is_folder and parent_id in item.parents and item.name == name:
+                return item.id
+        return None
 
     def get_file_metadata(self, file_id: str) -> DriveFile:
+        self.metadata_calls.append(file_id)
         return self.files[file_id]
 
     def download_file(self, file_id: str, local_path: Path) -> None:
@@ -151,10 +180,10 @@ class ForbiddenDrive(BatchFakeDrive):
         raise AssertionError(f"Drive must not be mutated for {file_id}")
 
 
-def folder(file_id: str, parents: list[str]) -> DriveFile:
+def folder(file_id: str, parents: list[str], name: str | None = None) -> DriveFile:
     return DriveFile(
         id=file_id,
-        name=file_id,
+        name=name or file_id,
         mime_type="application/vnd.google-apps.folder",
         parents=parents,
         capabilities={"canAddChildren": True, "canEdit": True, "canMoveItemWithinDrive": True, "canUntrash": True},
@@ -166,6 +195,20 @@ def scopes() -> list[BatchScope]:
         BatchScope("generic", "generic-inbox", "root"),
         BatchScope("brand", "brand-inbox", "root", brand_slug="grandiosa-mujer", collection="evergreen"),
         BatchScope("title", "title-inbox", "root", title_type="series", title="Mi otra yo"),
+    ]
+
+
+def leaf_scopes() -> list[BatchScope]:
+    return [
+        BatchScope("generic", "generic-inbox", "root"),
+        BatchScope(
+            "brand",
+            "brand-grandiosa-mujer-inbox",
+            "root",
+            brand_slug="grandiosa-mujer",
+            collection="evergreen",
+        ),
+        BatchScope("title", "title-mi-otra-yo-inbox", "root", title_type="series", title="Mi otra yo"),
     ]
 
 
@@ -245,6 +288,7 @@ def run(
     drive: BatchFakeDrive,
     request: BatchRequest | None = None,
     ai_enricher=None,
+    batch_scopes: list[BatchScope] | None = None,
 ):
     return run_drive_batch(
         session,
@@ -254,7 +298,7 @@ def run(
         preview,
         ai_enricher or ai(),
         drive,
-        scopes(),
+        batch_scopes or scopes(),
     )
 
 
@@ -284,6 +328,171 @@ def test_batch_processes_sequentially(session: Session) -> None:
     run(session, BatchFakeDrive({"generic": 2, "brand": 1, "title": 0}), ai_enricher=ai(order))
 
     assert order == ["generic-1", "generic-2", "brand-1"]
+
+
+def test_scope_generic_discovers_only_generic(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 2, "brand": 2, "title": 2})
+
+    result = run(session, drive, BatchRequest(scope="generic", max_total=10, max_per_scope=10))
+
+    assert {asset.scope for asset in result.assets} == {"generic"}
+    assert drive.list_calls == [("generic-inbox", 10)]
+
+
+def test_scope_title_uses_configured_leaf_when_it_matches_requested_slug(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 2, "brand": 2, "title": 2})
+
+    result = run(
+        session,
+        drive,
+        BatchRequest(scope="title", title_slug="mi-otra-yo", max_total=10, max_per_scope=10),
+        batch_scopes=leaf_scopes(),
+    )
+
+    assert {asset.scope for asset in result.assets} == {"title"}
+    assert [asset.drive_file_id for asset in result.assets] == ["title-1", "title-2"]
+    assert drive.metadata_calls[0] == "title-mi-otra-yo-inbox"
+    assert drive.find_child_folder_calls == []
+    assert drive.list_calls == [("title-mi-otra-yo-inbox", 10)]
+
+
+def test_scope_title_discovers_selected_title_child_when_configured_folder_is_parent(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 2, "brand": 2, "title": 2})
+
+    result = run(
+        session,
+        drive,
+        BatchRequest(scope="title", title_slug="mi-otra-yo", max_total=10, max_per_scope=10),
+    )
+
+    assert {asset.scope for asset in result.assets} == {"title"}
+    assert [asset.drive_file_id for asset in result.assets] == ["title-1", "title-2"]
+    assert drive.metadata_calls[0] == "title-inbox"
+    assert drive.find_child_folder_calls == [("title-inbox", "mi-otra-yo")]
+    assert drive.list_calls == [("title-mi-otra-yo-inbox", 10)]
+
+
+def test_scope_brand_uses_configured_leaf_when_it_matches_requested_slug(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 2, "brand": 2, "title": 2})
+
+    result = run(
+        session,
+        drive,
+        BatchRequest(scope="brand", brand_slug="grandiosa-mujer", max_total=10, max_per_scope=10),
+        batch_scopes=leaf_scopes(),
+    )
+
+    assert {asset.scope for asset in result.assets} == {"brand"}
+    assert [asset.drive_file_id for asset in result.assets] == ["brand-1", "brand-2"]
+    assert drive.metadata_calls[0] == "brand-grandiosa-mujer-inbox"
+    assert drive.find_child_folder_calls == []
+    assert drive.list_calls == [("brand-grandiosa-mujer-inbox", 10)]
+
+
+def test_scope_brand_discovers_selected_brand_child_when_configured_folder_is_parent(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 2, "brand": 2, "title": 2})
+
+    result = run(
+        session,
+        drive,
+        BatchRequest(scope="brand", brand_slug="grandiosa-mujer", max_total=10, max_per_scope=10),
+    )
+
+    assert {asset.scope for asset in result.assets} == {"brand"}
+    assert [asset.drive_file_id for asset in result.assets] == ["brand-1", "brand-2"]
+    assert drive.metadata_calls[0] == "brand-inbox"
+    assert drive.find_child_folder_calls == [("brand-inbox", "grandiosa-mujer")]
+    assert drive.list_calls == [("brand-grandiosa-mujer-inbox", 10)]
+
+
+def test_selected_title_does_not_discover_generic_even_when_generic_has_many_files(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 20, "brand": 0, "title": 2})
+
+    result = run(
+        session,
+        drive,
+        BatchRequest(scope="title", title_slug="mi-otra-yo", max_total=10, max_per_scope=10),
+    )
+
+    assert [asset.drive_file_id for asset in result.assets] == ["title-1", "title-2"]
+    assert drive.list_calls == [("title-mi-otra-yo-inbox", 10)]
+
+
+def test_selected_brand_does_not_discover_generic(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 20, "brand": 2, "title": 0})
+
+    result = run(
+        session,
+        drive,
+        BatchRequest(scope="brand", brand_slug="grandiosa-mujer", max_total=10, max_per_scope=10),
+    )
+
+    assert [asset.drive_file_id for asset in result.assets] == ["brand-1", "brand-2"]
+    assert drive.list_calls == [("brand-grandiosa-mujer-inbox", 10)]
+
+
+def test_max_total_applies_inside_selected_source(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 20, "brand": 0, "title": 5})
+
+    result = run(
+        session,
+        drive,
+        BatchRequest(scope="title", title_slug="mi-otra-yo", max_total=2, max_per_scope=10),
+    )
+
+    assert [asset.drive_file_id for asset in result.assets] == ["title-1", "title-2"]
+    assert result.counters.files_discovered == 5
+    assert result.counters.files_new == 2
+    assert drive.list_calls == [("title-mi-otra-yo-inbox", 10)]
+
+
+def test_batch_without_scope_keeps_global_discovery(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 1, "brand": 1, "title": 1})
+
+    result = run(session, drive, BatchRequest(max_total=3, max_per_scope=1))
+
+    assert [asset.scope for asset in result.assets] == ["generic", "brand", "title"]
+    assert [folder_id for folder_id, _limit in drive.list_calls] == ["generic-inbox", "brand-inbox", "title-inbox"]
+
+
+def test_selected_title_requires_title_slug(session: Session) -> None:
+    with pytest.raises(ValueError, match="--scope title requires --title"):
+        run(session, BatchFakeDrive(), BatchRequest(scope="title"))
+
+
+def test_selected_brand_requires_brand_slug(session: Session) -> None:
+    with pytest.raises(ValueError, match="--scope brand requires --brand"):
+        run(session, BatchFakeDrive(), BatchRequest(scope="brand"))
+
+
+def test_title_selector_without_title_scope_fails(session: Session) -> None:
+    with pytest.raises(ValueError, match="--title can only be used with --scope title"):
+        run(session, BatchFakeDrive(), BatchRequest(title_slug="mi-otra-yo"))
+
+
+def test_brand_selector_without_brand_scope_fails(session: Session) -> None:
+    with pytest.raises(ValueError, match="--brand can only be used with --scope brand"):
+        run(session, BatchFakeDrive(), BatchRequest(brand_slug="grandiosa-mujer"))
+
+
+def test_unknown_title_selector_does_not_fall_back_to_global(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 2, "brand": 2, "title": 2})
+
+    with pytest.raises(ValueError, match="configured title inbox is not available"):
+        run(session, drive, BatchRequest(scope="title", title_slug="otra-serie"))
+
+    assert drive.find_child_folder_calls == [("title-inbox", "otra-serie"), ("root", "otra-serie")]
+    assert drive.list_calls == []
+
+
+def test_unknown_brand_selector_does_not_fall_back_to_global(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 2, "brand": 2, "title": 2})
+
+    with pytest.raises(ValueError, match="configured brand inbox is not available"):
+        run(session, drive, BatchRequest(scope="brand", brand_slug="otra-marca"))
+
+    assert drive.find_child_folder_calls == [("brand-inbox", "otra-marca"), ("root", "otra-marca")]
+    assert drive.list_calls == []
 
 
 def test_batch_skips_ready_moved_and_review_moved(session: Session) -> None:
@@ -945,6 +1154,25 @@ def test_apply_global_handles_generic_brand_title_from_db(session: Session) -> N
     assert drive.list_calls == []
 
 
+def test_apply_selected_title_uses_db_driven_candidates_without_discovery(session: Session) -> None:
+    drive = BatchFakeDrive({"generic": 1, "brand": 1, "title": 1})
+    run(session, drive, BatchRequest(max_total=3, max_per_scope=1), ai())
+    drive.list_calls.clear()
+
+    applied = run(
+        session,
+        drive,
+        BatchRequest(apply=True, scope="title", title_slug="mi-otra-yo", max_total=3, max_per_scope=3),
+        ai_enricher=lambda *_args: pytest.fail("AI called"),
+    )
+
+    assert [row.drive_file_id for row in applied.assets] == ["title-1"]
+    assert applied.counters.plans_selected == 1
+    assert applied.counters.files_applied == 1
+    assert [move[0] for move in drive.moves] == ["title-1"]
+    assert drive.list_calls == []
+
+
 def test_approved_routes_by_scope(session: Session) -> None:
     result = run(session, BatchFakeDrive({"generic": 1, "brand": 1, "title": 1}))
     paths = {asset.scope: asset.target_path for asset in result.assets}
@@ -1057,6 +1285,83 @@ def test_nvidia_reduced_schema_accepts_legacy_payload_without_people_fields() ->
     assert result.visual_presentation == "not_applicable"
     assert result.person_visibility == "not_applicable"
     assert result.search_terms == []
+
+
+@pytest.mark.parametrize("primary_topic", ["conduccion", "videojuegos", "futbol", "belleza"])
+def test_nvidia_reduced_schema_accepts_one_word_primary_topic(primary_topic: str) -> None:
+    result = parse_reduced_result(
+        f"""
+        {{
+          "title_es": "asset visual",
+          "description_es": "Asset visual valido.",
+          "primary_theme": "otros",
+          "primary_topic": "{primary_topic}",
+          "tags": ["asset", "visual"],
+          "suggested_uses": ["broll"],
+          "has_visible_text": false,
+          "has_logo": false,
+          "can_flip_horizontal": true,
+          "flip_risk_reasons": [],
+          "can_zoom": true,
+          "max_safe_zoom": 1.0,
+          "generic_compatibility": true,
+          "requires_review": false,
+          "warnings": []
+        }}
+        """
+    )
+
+    assert result.primary_topic == primary_topic
+
+
+def test_nvidia_reduced_schema_rejects_empty_primary_topic() -> None:
+    with pytest.raises(Exception, match="primary_topic"):
+        parse_reduced_result(
+            """
+            {
+              "title_es": "asset visual",
+              "description_es": "Asset visual invalido.",
+              "primary_theme": "otros",
+              "primary_topic": "",
+              "tags": ["asset", "visual"],
+              "suggested_uses": ["broll"],
+              "has_visible_text": false,
+              "has_logo": false,
+              "can_flip_horizontal": true,
+              "flip_risk_reasons": [],
+              "can_zoom": true,
+              "max_safe_zoom": 1.0,
+              "generic_compatibility": true,
+              "requires_review": false,
+              "warnings": []
+            }
+            """
+        )
+
+
+def test_nvidia_reduced_schema_rejects_primary_topic_over_eight_words() -> None:
+    with pytest.raises(Exception, match="primary_topic"):
+        parse_reduced_result(
+            """
+            {
+              "title_es": "asset visual",
+              "description_es": "Asset visual invalido.",
+              "primary_theme": "otros",
+              "primary_topic": "uno dos tres cuatro cinco seis siete ocho nueve",
+              "tags": ["asset", "visual"],
+              "suggested_uses": ["broll"],
+              "has_visible_text": false,
+              "has_logo": false,
+              "can_flip_horizontal": true,
+              "flip_risk_reasons": [],
+              "can_zoom": true,
+              "max_safe_zoom": 1.0,
+              "generic_compatibility": true,
+              "requires_review": false,
+              "warnings": []
+            }
+            """
+        )
 
 
 def test_nvidia_reduced_schema_keeps_people_search_terms_without_network() -> None:

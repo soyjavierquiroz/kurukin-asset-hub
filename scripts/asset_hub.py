@@ -37,6 +37,7 @@ from app.services.managed_drive_pilot import (
     replan_reviewed_assets,
     run_drive_batch,
     approve_review_asset,
+    validate_batch_source_selector,
 )
 
 EXIT_SUCCESS = 0
@@ -73,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--max-per-scope", type=int, default=25)
     batch.add_argument("--concurrency", type=int, default=1)
     batch.add_argument("--only-file-id", action="append", default=[])
+    batch.add_argument("--scope", choices=["generic", "brand", "title"])
+    batch.add_argument("--brand", dest="brand_slug")
+    batch.add_argument("--title", dest="title_slug")
 
     replan_reviewed = drive_subparsers.add_parser(
         "replan-reviewed",
@@ -173,16 +177,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def handle_drive(args: argparse.Namespace, session: Session) -> int:
     if args.action == "batch":
+        request = BatchRequest(
+            apply=args.apply,
+            max_total=args.max_total,
+            max_per_scope=args.max_per_scope,
+            concurrency=args.concurrency,
+            only_file_ids=tuple(args.only_file_id),
+            scope=args.scope,
+            brand_slug=args.brand_slug,
+            title_slug=args.title_slug,
+        )
+        validate_batch_source_selector(request)
         assert_pilot_database(session)
         result = run_drive_batch(
             session,
-            BatchRequest(
-                apply=args.apply,
-                max_total=args.max_total,
-                max_per_scope=args.max_per_scope,
-                concurrency=args.concurrency,
-                only_file_ids=tuple(args.only_file_id),
-            ),
+            request,
         )
         output(args, result.to_dict(), batch_lines(result.to_dict()))
         if not result.lock_acquired:

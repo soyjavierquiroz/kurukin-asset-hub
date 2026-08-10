@@ -79,6 +79,66 @@ def test_batch_apply_cli_does_not_call_ai(
     assert captured["request"].apply is True
 
 
+def test_batch_cli_passes_source_selector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_run(_session, request):
+        captured["request"] = request
+        return fake_batch_result(apply=False)
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_drive_batch", fake_run)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "drive",
+            "batch",
+            "--scope",
+            "title",
+            "--title",
+            "mi-otra-yo",
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    assert captured["request"].scope == "title"
+    assert captured["request"].title_slug == "mi-otra-yo"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--scope", "title"], "--scope title requires --title"),
+        (["--scope", "brand"], "--scope brand requires --brand"),
+        (["--title", "mi-otra-yo"], "--title can only be used with --scope title"),
+        (["--brand", "grandiosa-mujer"], "--brand can only be used with --scope brand"),
+    ],
+)
+def test_batch_cli_selector_validation_fails_with_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    message: str,
+) -> None:
+    env_file = write_env(tmp_path)
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_drive_batch", lambda *_args, **_kwargs: pytest.fail("batch should not run"))
+
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "batch", *arguments])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert message in captured.err
+
+
 def test_status_filters_correctly(session: Session) -> None:
     source = add_source(session)
     add_asset(session, source, "ready-1", status="ready", scope="generic")

@@ -161,6 +161,7 @@ class LegacyLayoutMigrationError(ManagedDriveError):
 class DriveClient(Protocol):
     def list_folder(self, folder_id: str, limit: int) -> list[DriveFile]: ...
     def get_file_metadata(self, file_id: str) -> DriveFile: ...
+    def find_child_folder_id(self, parent_id: str, name: str) -> str | None: ...
     def download_file(self, file_id: str, local_path: Path) -> None: ...
     def create_folder(self, parent_id: str, name: str) -> str: ...
     def rename_and_move_file(
@@ -452,6 +453,8 @@ def run_drive_batch(
         raise ValueError("max_per_scope must be at least 1")
     if request_data.concurrency != 1:
         raise ValueError("pilot batch concurrency must be 1")
+    configured_scopes = scopes or default_batch_scopes()
+    validate_batch_source_selector(request_data)
 
     started_at = datetime.now(UTC)
     counters = BatchCounters()
@@ -472,7 +475,11 @@ def run_drive_batch(
     mutation_client = mutation_client or (
         mutation_client_for_apply(drive_client) if request_data.apply else None
     )
-    scopes = scopes or default_batch_scopes()
+    scopes = selected_batch_scopes(
+        request_data,
+        configured_scopes,
+        None if request_data.apply else drive_client,
+    )
     if request_data.apply:
         try:
             return run_drive_batch_apply(
@@ -634,6 +641,79 @@ def run_drive_batch_apply(
         counters=counters,
         assets=assets,
     )
+
+
+def selected_batch_scopes(
+    request_data: BatchRequest,
+    scopes: list[BatchScope],
+    drive_client: DriveClient | None = None,
+) -> list[BatchScope]:
+    validate_batch_source_selector(request_data)
+    if request_data.scope is None:
+        return scopes
+    if request_data.scope == "generic":
+        selected = [scope for scope in scopes if scope.scope == "generic"]
+    elif request_data.scope == "brand":
+        selected = [
+            scope for scope in scopes if scope.scope == "brand" and scope.brand_slug == request_data.brand_slug
+        ]
+        selected = selected or [scope for scope in scopes if scope.scope == "brand"]
+    else:
+        selected = [
+            scope for scope in scopes if scope.scope == "title" and slugify(scope.title or "") == request_data.title_slug
+        ]
+        selected = selected or [scope for scope in scopes if scope.scope == "title"]
+    if not selected:
+        raise ValueError(selected_batch_scope_error(request_data))
+    if drive_client is None or request_data.scope == "generic":
+        return selected
+    return [resolve_selected_batch_source(request_data, selected[0], drive_client)]
+
+
+def resolve_selected_batch_source(
+    request_data: BatchRequest,
+    scope_config: BatchScope,
+    drive_client: DriveClient,
+) -> BatchScope:
+    requested_slug = request_data.brand_slug if request_data.scope == "brand" else request_data.title_slug
+    assert requested_slug is not None
+    configured_folder = drive_client.get_file_metadata(scope_config.source_folder_id)
+    if slugify(configured_folder.name) == requested_slug:
+        return replace(scope_config, source_folder_id=configured_folder.id)
+
+    child_id = drive_client.find_child_folder_id(configured_folder.id, requested_slug)
+    if child_id:
+        return replace(scope_config, source_folder_id=child_id)
+
+    sibling_id = None
+    for parent_id in configured_folder.parents:
+        sibling_id = drive_client.find_child_folder_id(parent_id, requested_slug)
+        if sibling_id:
+            break
+    if not sibling_id:
+        raise ValueError(selected_batch_scope_error(request_data))
+    return replace(scope_config, source_folder_id=sibling_id)
+
+
+def validate_batch_source_selector(request_data: BatchRequest) -> None:
+    if request_data.scope not in {None, "generic", "brand", "title"}:
+        raise ValueError("--scope must be one of: generic, brand, title")
+    if request_data.brand_slug and request_data.scope != "brand":
+        raise ValueError("--brand can only be used with --scope brand")
+    if request_data.title_slug and request_data.scope != "title":
+        raise ValueError("--title can only be used with --scope title")
+    if request_data.scope == "brand" and not request_data.brand_slug:
+        raise ValueError("--scope brand requires --brand")
+    if request_data.scope == "title" and not request_data.title_slug:
+        raise ValueError("--scope title requires --title")
+
+
+def selected_batch_scope_error(request_data: BatchRequest) -> str:
+    if request_data.scope == "generic":
+        return "configured generic inbox is not available"
+    if request_data.scope == "brand":
+        return f"configured brand inbox is not available for --brand {request_data.brand_slug}"
+    return f"configured title inbox is not available for --title {request_data.title_slug}"
 
 
 def list_drive_status(
@@ -3167,7 +3247,7 @@ def valid_primary_topic(value: str | None) -> bool:
     topic = normalize_primary_topic(value)
     if not topic:
         return False
-    return 2 <= len(topic.split()) <= 8
+    return 1 <= len(topic.split()) <= 8
 
 
 def trim_primary_topic(value: str, limit: int) -> str:
@@ -3926,6 +4006,10 @@ class RcloneDriveClient:
             return self._files_by_id[file_id]
         stat = self._lsjson(["--drive-root-folder-id", file_id, "--stat"])
         if isinstance(stat, dict) and stat.get("IsDir"):
+            api_metadata = self._google_drive_metadata(file_id)
+            if api_metadata is not None:
+                self._files_by_id[file_id] = api_metadata
+                return api_metadata
             return DriveFile(
                 id=file_id,
                 name=str(stat.get("Name") or ""),
@@ -3941,6 +4025,15 @@ class RcloneDriveClient:
                 },
             )
         raise DriveFileNotFoundError(f"file metadata is not cached for ID {file_id}")
+
+    def _google_drive_metadata(self, file_id: str) -> DriveFile | None:
+        try:
+            return GoogleDriveMutationClient.from_rclone_remote(
+                self.remote,
+                self._source_config_path,
+            ).get_file_metadata(file_id)
+        except ManagedDriveError:
+            return None
 
     def download_file(self, file_id: str, local_path: Path) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3959,6 +4052,23 @@ class RcloneDriveClient:
                 self._folder_paths_by_id[folder_id] = str(PurePosixPath(parent_path) / clean_name)
                 return folder_id
         raise ManagedDriveError("rclone mkdir succeeded but created folder ID was not found")
+
+    def find_child_folder_id(self, parent_id: str, name: str) -> str | None:
+        clean_name = str(PurePosixPath(name).name)
+        try:
+            result = self._run(
+                ["rclone", "lsjson", f"{self.remote}:{clean_name}", "--drive-root-folder-id", parent_id, "--stat"],
+                timeout=120,
+            )
+        except ManagedDriveError:
+            return None
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ManagedDriveError("rclone lsjson returned invalid JSON") from exc
+        if isinstance(payload, dict) and payload.get("IsDir") and payload.get("ID"):
+            return str(payload["ID"])
+        return None
 
     def rename_and_move_file(
         self,
@@ -4126,6 +4236,9 @@ class GoogleDriveMutationClient:
             fields="id",
         ).execute()
         return str(payload["id"])
+
+    def find_child_folder_id(self, parent_id: str, name: str) -> str | None:
+        return self._find_folder(parent_id, name)
 
     def rename_and_move_file(
         self,
@@ -4296,6 +4409,9 @@ class GoogleDriveAPIClient:
             },
         )
         return str(payload["id"])
+
+    def find_child_folder_id(self, parent_id: str, name: str) -> str | None:
+        return self._find_folder(parent_id, name)
 
     def rename_and_move_file(
         self,
