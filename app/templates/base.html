@@ -11,15 +11,16 @@
       <div class="topbar-inner">
         <a href="/assets" class="brand">Managed Drive Asset Hub</a>
         <nav class="main-nav">
-          <a href="/assets">Assets</a>
-          <a href="/reviews">Revision</a>
+          <a href="/assets" {% if request.url.path.startswith('/assets') %}class="active"{% endif %}>Assets</a>
+          <a href="/brands" {% if request.url.path.startswith('/brands') %}class="active"{% endif %}>Brands</a>
+          <a href="/titles" {% if request.url.path.startswith('/titles') %}class="active"{% endif %}>Titles</a>
+          <a href="/niches" {% if request.url.path.startswith('/niches') %}class="active"{% endif %}>Niches</a>
+          <a href="/reviews" {% if request.url.path.startswith('/reviews') %}class="active"{% endif %}>Reviews</a>
         </nav>
         <nav class="secondary-nav">
           <a href="/">Dashboard</a>
           <a href="/sources">Sources</a>
-          <a href="/brands">Brands</a>
           <a href="/products">Products</a>
-          <a href="/niches">Niches</a>
         </nav>
       </div>
     </header>

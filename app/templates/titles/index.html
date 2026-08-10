@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% macro title_type_label(value) %}
+  {% if value == "series" %}Serie{% elif value == "movie" %}Película{% else %}Título{% endif %}
+{% endmacro %}
+
+{% macro title_group(items, group_type, heading) %}
+  <section class="detail-panel">
+    <h2>{{ heading }}</h2>
+    <div class="compact-list">
+      {% for title in items if title.title_type == group_type %}
+        <div class="list-row">
+          <div>
+            <div class="list-title">{{ title.title_name or title.title_slug }}</div>
+            <div class="muted">{{ title_type_label(title.title_type) }} · {{ title.title_slug }} · {{ title.asset_count }} assets</div>
+          </div>
+          <div class="row-actions">
+            <a class="button" href="/assets?scope=title&title_slug={{ title.title_slug }}">Ver assets</a>
+          </div>
+        </div>
+      {% else %}
+        <p class="muted">No hay {{ heading|lower }} con assets todavía.</p>
+      {% endfor %}
+    </div>
+  </section>
+{% endmacro %}
+
+{% block content %}
+  <div class="page-head">
+    <div>
+      <h1>Titles</h1>
+      <div class="countline"><span>{{ titles|length }} títulos con assets</span></div>
+    </div>
+  </div>
+
+  <div class="detail-grid">
+    {{ title_group(titles, "series", "Series") }}
+    {{ title_group(titles, "movie", "Películas") }}
+  </div>
+{% endblock %}

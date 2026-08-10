@@ -19,6 +19,20 @@
   {% endif %}
 {% endmacro %}
 
+{% macro scope_badge(asset) %}
+  {% if asset.scope == "generic" %}
+    <span class="badge scope">GENÉRICO</span>
+  {% elif asset.scope == "brand" %}
+    <span class="badge scope">MARCA</span>
+  {% elif asset.scope == "title" and asset.title_type == "series" %}
+    <span class="badge scope">SERIE</span>
+  {% elif asset.scope == "title" and asset.title_type == "movie" %}
+    <span class="badge scope">PELÍCULA</span>
+  {% elif asset.scope == "title" %}
+    <span class="badge scope">TÍTULO</span>
+  {% endif %}
+{% endmacro %}
+
 {% block content %}
   <div class="page-head">
     <div>
@@ -29,6 +43,10 @@
       </div>
     </div>
   </div>
+
+  {% if discarded %}
+    <div class="notice">Asset eliminado y enviado a la papelera de Google Drive.</div>
+  {% endif %}
 
   <form class="filter-panel" method="get">
     <label>Busqueda
@@ -50,6 +68,30 @@
       <select name="scope">
         <option value="">Todos</option>
         {% for value in scope_values %}<option value="{{ value }}" {% if filters.scope == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Brand
+      <select name="brand">
+        <option value="">Todas</option>
+        {% for item in brands %}<option value="{{ item.slug }}" {% if filters.brand == item.slug %}selected{% endif %}>{{ item.name or item.slug }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Title type
+      <select name="title_type">
+        <option value="">Todos</option>
+        {% for value in title_type_values %}<option value="{{ value }}" {% if filters.title_type == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Title
+      <select name="title_slug">
+        <option value="">Todos</option>
+        {% for value in title_slug_values %}<option value="{{ value }}" {% if filters.title_slug == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Niche
+      <select name="niche">
+        <option value="">Todos</option>
+        {% for item in niches %}<option value="{{ item.slug }}" {% if filters.niche == item.slug %}selected{% endif %}>{{ item.name or item.slug }}</option>{% endfor %}
       </select>
     </label>
     <label>Media type
@@ -125,11 +167,16 @@
           {% endif %}
         </a>
         <div class="card-body">
+          <div class="badges">{{ scope_badge(asset) }}</div>
           <a class="asset-title" href="/assets/{{ asset.id }}">{{ asset.title or asset.filename }}</a>
           {% if asset.review_reason %}<p class="muted">{{ asset.review_reason }}</p>{% endif %}
+          {% if asset.scope == "brand" and asset.brand %}
+            <p class="muted">Marca: {{ asset.brand.name or asset.brand.slug }}{% if asset.collection %}<br>Colección: {{ asset.collection }}{% endif %}</p>
+          {% elif asset.scope == "title" %}
+            <p class="muted">{{ asset.title_name or asset.title or asset.title_slug }}{% if asset.collection %}<br>Contexto: {{ asset.collection }}{% endif %}</p>
+          {% endif %}
           <div class="meta-grid">
             <div class="meta"><span>Media</span><strong>{{ asset.type }}</strong></div>
-            <div class="meta"><span>Scope</span><strong>{{ asset.scope or "-" }}</strong></div>
             <div class="meta"><span>Status</span><strong>{{ asset.status }}</strong></div>
             <div class="meta"><span>Orientation</span><strong>{{ asset.orientation }}</strong></div>
             <div class="meta"><span>Theme</span><strong>{{ asset.primary_theme or "-" }}</strong></div>
@@ -137,6 +184,11 @@
             <div class="meta"><span>People</span><strong>{{ ai.get("visual_presentation") or "-" }}</strong></div>
             <div class="meta"><span>Move</span><strong>{{ asset.move_status }}</strong></div>
           </div>
+          {% if asset.niches %}
+            <div class="badges">
+              {% for niche in asset.niches[:4] %}<span class="badge">{{ niche.name or niche.slug }}</span>{% endfor %}
+            </div>
+          {% endif %}
           <div class="badges">{{ badge(asset) }}</div>
           <div class="badges">
             <span class="badge">AI {{ asset.ai_enrichment_status }}</span>

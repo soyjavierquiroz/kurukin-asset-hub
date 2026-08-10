@@ -1,33 +1,28 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <div class="mb-6 flex items-center justify-between">
-    <h1 class="text-2xl font-semibold tracking-normal">Brands</h1>
-    <a class="rounded bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800" href="/brands/new">New brand</a>
+  <div class="page-head">
+    <div>
+      <h1>Brands</h1>
+      <div class="countline"><span>{{ brands|length }} brands con assets</span></div>
+    </div>
   </div>
 
-  <div class="overflow-hidden rounded border border-zinc-200 bg-white">
-    <table class="w-full text-left text-sm">
-      <thead class="bg-zinc-100 text-xs uppercase tracking-normal text-zinc-500">
-        <tr>
-          <th class="px-4 py-3">Name</th>
-          <th class="px-4 py-3">Slug</th>
-          <th class="px-4 py-3">Enabled</th>
-          <th class="px-4 py-3"></th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-zinc-200">
-        {% for brand in brands %}
-          <tr>
-            <td class="px-4 py-3 font-medium">{{ brand.name }}</td>
-            <td class="px-4 py-3">{{ brand.slug }}</td>
-            <td class="px-4 py-3">{{ brand.enabled }}</td>
-            <td class="px-4 py-3 text-right"><a class="font-medium text-zinc-700 underline decoration-zinc-300 underline-offset-2" href="/brands/{{ brand.id }}/edit">Edit</a></td>
-          </tr>
-        {% else %}
-          <tr><td class="px-4 py-8 text-center text-zinc-500" colspan="4">No brands found.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <section class="detail-panel">
+    <div class="compact-list">
+      {% for brand in brands %}
+        <div class="list-row">
+          <div>
+            <div class="list-title">{{ brand.name or brand.slug }}</div>
+            <div class="muted">{{ brand.slug }} · {{ brand.asset_count }} assets{% if brand.collection_count %} · {{ brand.collection_count }} colecciones{% endif %}</div>
+          </div>
+          <div class="row-actions">
+            <a class="button" href="/assets?scope=brand&brand={{ brand.slug }}">Ver assets</a>
+          </div>
+        </div>
+      {% else %}
+        <p class="muted">No hay brands con assets todavía.</p>
+      {% endfor %}
+    </div>
+  </section>
 {% endblock %}

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Select, String, and_, cast, delete, func, or_, select, update
+from sqlalchemy import Select, String, and_, cast, delete, distinct, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -277,6 +277,57 @@ def delete_asset_with_dependents(session: Session, asset: Asset) -> None:
     session.delete(asset)
 
 
+def discard_asset_from_catalog(session: Session, asset: Asset) -> None:
+    asset_id = asset.id
+    file_id = asset.drive_file_id
+    if not file_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing Drive file ID")
+
+    preview_paths = [asset.thumbnail_path, asset.preview_path]
+    read_client = drive_client_from_environment()
+    drive_client = mutation_client_for_apply(read_client)
+    try:
+        drive_client.trash_file(file_id)
+        metadata = drive_client.get_file_metadata(file_id)
+    except Exception as exc:
+        logger.exception("Drive trash failed for asset_id=%s file_id=%s", asset_id, file_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Drive trash failed: {exc}",
+        ) from exc
+    if metadata.id != file_id or not metadata.trashed:
+        logger.error(
+            "Drive trash verification failed for asset_id=%s file_id=%s trashed=%s",
+            asset_id,
+            file_id,
+            metadata.trashed,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Drive trash verification failed",
+        )
+
+    try:
+        delete_asset_with_dependents(session, asset)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        try:
+            drive_client.untrash_file(file_id)
+        except Exception:
+            logger.exception("Drive untrash rollback failed for asset_id=%s file_id=%s", asset_id, file_id)
+        logger.exception("Database discard failed after Drive trash for asset_id=%s file_id=%s", asset_id, file_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database discard failed after Drive trash; Drive untrash rollback was attempted",
+        ) from exc
+
+    try:
+        cleanup_discard_preview_dir(asset_id, preview_paths)
+    except Exception:
+        logger.warning("Preview cleanup failed for discarded asset_id=%s", asset_id, exc_info=True)
+
+
 def asset_sort_order(sort: str | None) -> list[object]:
     match sort:
         case "oldest":
@@ -298,9 +349,12 @@ def apply_asset_filters(
     filters: list[object],
     *,
     niche_id: int | None = None,
+    niche: str | None = None,
 ) -> Select[tuple[Asset]]:
     if niche_id:
         query = query.join(Asset.niches).where(Niche.id == niche_id)
+    if clean_text(niche):
+        query = query.join(Asset.niches).where(or_(Niche.slug == niche.strip(), Niche.name == niche.strip()))
     if filters:
         query = query.where(and_(*filters))
     return query
@@ -315,6 +369,9 @@ def build_asset_filters(
     orientation: str | None = None,
     status: str | None = None,
     move_status: str | None = None,
+    brand: str | None = None,
+    title_type: str | None = None,
+    title_slug: str | None = None,
     keyword: str | None = None,
     usage_scope: str | None = None,
     scope: str | None = None,
@@ -356,6 +413,8 @@ def build_asset_filters(
         )
     if brand_id:
         filters.append(Asset.brand_id == brand_id)
+    if clean_text(brand):
+        filters.append(Asset.brand.has(Brand.slug == brand.strip()))
     if product_id:
         filters.append(Asset.product_id == product_id)
     if type:
@@ -372,6 +431,10 @@ def build_asset_filters(
         filters.append(Asset.usage_scope == usage_scope)
     if scope:
         filters.append(Asset.scope == scope)
+    if title_type:
+        filters.append(Asset.title_type == title_type)
+    if clean_text(title_slug):
+        filters.append(Asset.title_slug == title_slug.strip())
     if auto_select_enabled is not None:
         filters.append(Asset.auto_select_enabled.is_(auto_select_enabled))
     if ai_status:
@@ -421,14 +484,18 @@ def assets_index(
     session: DbSession,
     q: str | None = None,
     brand_id: int | None = None,
+    brand: str | None = None,
     product_id: int | None = None,
     niche_id: int | None = None,
+    niche: str | None = None,
     type: str | None = None,
     media_type: str | None = None,
     orientation: str | None = None,
     status: str | None = None,
     move_status: str | None = None,
     scope: str | None = None,
+    title_type: str | None = None,
+    title_slug: str | None = None,
     primary_theme: str | None = None,
     contains_people: str | None = None,
     visual_presentation: str | None = None,
@@ -441,6 +508,7 @@ def assets_index(
     needs_human_review: str | None = None,
     sort: str = "newest",
     page: int = 1,
+    discarded: bool = False,
 ):
     page = max(page, 1)
     per_page = 48
@@ -457,6 +525,9 @@ def assets_index(
         orientation=orientation,
         status=status,
         move_status=move_status,
+        brand=brand,
+        title_type=title_type,
+        title_slug=title_slug,
         keyword=keyword,
         usage_scope=usage_scope,
         scope=scope,
@@ -478,8 +549,8 @@ def assets_index(
         selectinload(Asset.ai_analyses),
     )
     count_query = select(func.count(func.distinct(Asset.id))).select_from(Asset)
-    query = apply_asset_filters(query, filters, niche_id=niche_id)
-    count_query = apply_asset_filters(count_query, filters, niche_id=niche_id)
+    query = apply_asset_filters(query, filters, niche_id=niche_id, niche=niche)
+    count_query = apply_asset_filters(count_query, filters, niche_id=niche_id, niche=niche)
 
     total = session.scalar(count_query) or 0
     catalog_total = session.scalar(select(func.count()).select_from(Asset)) or 0
@@ -499,20 +570,45 @@ def assets_index(
         {
             "page_title": "Assets",
             "assets": assets,
-            "brands": session.scalars(select(Brand).order_by(Brand.name)).all(),
+            "brands": session.scalars(
+                select(Brand)
+                .join(Asset)
+                .where(Asset.scope == "brand")
+                .distinct()
+                .order_by(Brand.name)
+            ).all(),
             "products": session.scalars(select(Product).order_by(Product.name)).all(),
-            "niches": session.scalars(select(Niche).order_by(Niche.name)).all(),
+            "niches": session.scalars(
+                select(Niche)
+                .join(AssetNiche, AssetNiche.niche_id == Niche.id)
+                .distinct()
+                .order_by(Niche.name)
+            ).all(),
+            "title_type_values": [
+                value
+                for value in session.scalars(
+                    select(Asset.title_type).where(Asset.title_type.is_not(None)).distinct().order_by(Asset.title_type)
+                ).all()
+                if value
+            ],
+            "title_slug_values": session.scalars(
+                select(Asset.title_slug).where(Asset.title_slug.is_not(None)).distinct().order_by(Asset.title_slug)
+            ).all(),
             "filters": {
                 "q": q or "",
                 "brand_id": brand_id,
+                "brand": brand or "",
                 "product_id": product_id,
                 "niche_id": niche_id,
+                "niche": niche or "",
                 "type": media_type or type or "",
                 "media_type": media_type or type or "",
                 "orientation": orientation or "",
                 "status": status or "",
                 "move_status": move_status or "",
                 "scope": scope or "",
+                "title_type": title_type or "",
+                "title_slug": title_slug or "",
                 "primary_theme": primary_theme or "",
                 "contains_people": contains_people or "",
                 "visual_presentation": visual_presentation or "",
@@ -552,13 +648,17 @@ def assets_index(
                 {
                     "q": q,
                     "brand_id": brand_id,
+                    "brand": brand,
                     "product_id": product_id,
                     "niche_id": niche_id,
+                    "niche": niche,
                     "media_type": media_type or type,
                     "orientation": orientation,
                     "status": status,
                     "move_status": move_status,
                     "scope": scope,
+                    "title_type": title_type,
+                    "title_slug": title_slug,
                     "primary_theme": primary_theme,
                     "contains_people": contains_people,
                     "visual_presentation": visual_presentation,
@@ -571,6 +671,7 @@ def assets_index(
                     "sort": sort,
                 }
             ),
+            "discarded": discarded,
             "page": page,
             "pages": pages,
             "total": total,
@@ -770,6 +871,15 @@ def assets_ai_enrich(
         dry_run=dry_run in {"true", "on"},
     )
     return redirect_to(f"/assets/{asset_id}")
+
+
+@router.post("/assets/{asset_id}/discard")
+def assets_discard(asset_id: int, _: AdminUser, session: DbSession):
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    discard_asset_from_catalog(session, asset)
+    return redirect_to("/assets?discarded=true")
 
 
 @router.post("/assets/generate-previews-bulk")
@@ -1042,53 +1152,7 @@ def reviews_discard(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
     if asset.status != "review_required" and not asset.needs_human_review:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
-    file_id = asset.drive_file_id
-    if not file_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing Drive file ID")
-
-    preview_paths = [asset.thumbnail_path, asset.preview_path]
-    read_client = drive_client_from_environment()
-    drive_client = mutation_client_for_apply(read_client)
-    try:
-        drive_client.trash_file(file_id)
-        metadata = drive_client.get_file_metadata(file_id)
-    except Exception as exc:
-        logger.exception("Drive trash failed for asset_id=%s file_id=%s", asset_id, file_id)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Drive trash failed: {exc}",
-        ) from exc
-    if metadata.id != file_id or not metadata.trashed:
-        logger.error(
-            "Drive trash verification failed for asset_id=%s file_id=%s trashed=%s",
-            asset_id,
-            file_id,
-            metadata.trashed,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Drive trash verification failed",
-        )
-
-    try:
-        delete_asset_with_dependents(session, asset)
-        session.commit()
-    except Exception as exc:
-        session.rollback()
-        try:
-            drive_client.untrash_file(file_id)
-        except Exception:
-            logger.exception("Drive untrash rollback failed for asset_id=%s file_id=%s", asset_id, file_id)
-        logger.exception("Database discard failed after Drive trash for asset_id=%s file_id=%s", asset_id, file_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database discard failed after Drive trash; Drive untrash rollback was attempted",
-        ) from exc
-
-    try:
-        cleanup_discard_preview_dir(asset_id, preview_paths)
-    except Exception:
-        logger.warning("Preview cleanup failed for discarded asset_id=%s", asset_id, exc_info=True)
+    discard_asset_from_catalog(session, asset)
 
     if action == "discard_next":
         next_asset_id = next_pending_review_id(session)
@@ -1301,11 +1365,42 @@ def sources_update(
 
 @router.get("/brands")
 def brands_index(request: Request, _: AdminUser, session: DbSession):
-    brands = session.scalars(select(Brand).order_by(Brand.name)).all()
+    brands = session.execute(
+        select(
+            Brand.name,
+            Brand.slug,
+            func.count(distinct(Asset.id)).label("asset_count"),
+            func.count(distinct(Asset.collection)).label("collection_count"),
+        )
+        .join(Asset, Asset.brand_id == Brand.id)
+        .where(Asset.scope == "brand")
+        .group_by(Brand.name, Brand.slug)
+        .order_by(Brand.name)
+    ).all()
     return templates.TemplateResponse(
         request,
         "brands/index.html",
         {"page_title": "Brands", "brands": brands},
+    )
+
+
+@router.get("/titles")
+def titles_index(request: Request, _: AdminUser, session: DbSession):
+    titles = session.execute(
+        select(
+            Asset.title_type,
+            Asset.title_slug,
+            func.coalesce(Asset.title_name, Asset.title).label("title_name"),
+            func.count(Asset.id).label("asset_count"),
+        )
+        .where(Asset.scope == "title", Asset.title_slug.is_not(None))
+        .group_by(Asset.title_type, Asset.title_slug, func.coalesce(Asset.title_name, Asset.title))
+        .order_by(Asset.title_type, func.coalesce(Asset.title_name, Asset.title))
+    ).all()
+    return templates.TemplateResponse(
+        request,
+        "titles/index.html",
+        {"page_title": "Titles", "titles": titles},
     )
 
 
@@ -1457,7 +1552,12 @@ def products_update(
 
 @router.get("/niches")
 def niches_index(request: Request, _: AdminUser, session: DbSession):
-    niches = session.scalars(select(Niche).order_by(Niche.name)).all()
+    niches = session.execute(
+        select(Niche.name, Niche.slug, func.count(AssetNiche.asset_id).label("asset_count"))
+        .join(AssetNiche, AssetNiche.niche_id == Niche.id)
+        .group_by(Niche.name, Niche.slug)
+        .order_by(Niche.name)
+    ).all()
     return templates.TemplateResponse(
         request,
         "niches/index.html",

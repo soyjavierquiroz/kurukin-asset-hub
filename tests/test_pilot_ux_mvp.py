@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import get_settings
 from app.db import Base, get_db_session
 from app.main import create_app
-from app.models import Asset, AssetAIAnalysis, AssetTag, Source
+from app.models import Asset, AssetAIAnalysis, AssetNiche, AssetTag, Brand, Niche, Source
 from app.services.managed_drive_pilot import DriveFile
 from app.web.routes import bool_filter
 
@@ -165,6 +165,159 @@ def mark_pending(session_factory: sessionmaker[Session], asset_id: int, reason: 
         asset.needs_human_review = True
         asset.review_reason = reason
         session.commit()
+
+
+def seed_catalog_scope_assets(session_factory: sessionmaker[Session]) -> dict[str, int]:
+    with session_factory() as session:
+        source = Source(
+            source_id="catalog-source",
+            provider="google_drive",
+            label="Catalog Source",
+            rclone_remote="pilot",
+            root_path="",
+        )
+        brand = Brand(slug="grandiosa-mujer", name="Grandiosa Mujer")
+        other_brand = Brand(slug="otra-marca", name="Otra Marca")
+        beauty = Niche(slug="belleza", name="belleza")
+        skincare = Niche(slug="skincare", name="skincare")
+        session.add_all([source, brand, other_brand, beauty, skincare])
+        session.flush()
+
+        generic = Asset(
+            asset_uid="catalog-generic",
+            source=source,
+            provider="google_drive",
+            remote_path="generic-yoga.mp4",
+            source_path="generic-yoga.mp4",
+            drive_file_id="drive-generic",
+            filename="generic-yoga.mp4",
+            title="Clip genérico yoga",
+            type="video",
+            status="ready",
+            scope="generic",
+            move_status="moved",
+            orientation="9:16",
+            primary_theme="cuidado personal",
+            primary_topic="yoga tranquilo",
+            search_text="yoga tranquilo",
+        )
+        branded = Asset(
+            asset_uid="catalog-brand",
+            source=source,
+            provider="google_drive",
+            remote_path="brand-crema.mp4",
+            source_path="brand-crema.mp4",
+            drive_file_id="drive-brand",
+            filename="brand-crema.mp4",
+            title="Mujer aplicando crema facial",
+            type="video",
+            status="ready",
+            scope="brand",
+            brand=brand,
+            collection="evergreen",
+            move_status="moved",
+            orientation="9:16",
+            primary_theme="cuidado personal",
+            primary_topic="crema facial",
+            search_text="crema facial belleza",
+        )
+        other_branded = Asset(
+            asset_uid="catalog-other-brand",
+            source=source,
+            provider="google_drive",
+            remote_path="other-brand.mp4",
+            source_path="other-brand.mp4",
+            drive_file_id="drive-other-brand",
+            filename="other-brand.mp4",
+            title="Otra marca asset",
+            type="video",
+            status="ready",
+            scope="brand",
+            brand=other_brand,
+            move_status="moved",
+            orientation="9:16",
+        )
+        series = Asset(
+            asset_uid="catalog-series",
+            source=source,
+            provider="google_drive",
+            remote_path="mi-otra-yo.mp4",
+            source_path="mi-otra-yo.mp4",
+            drive_file_id="drive-series",
+            filename="mi-otra-yo.mp4",
+            title="Mujer preocupada en dormitorio",
+            title_name="Mi Otra Yo",
+            title_slug="mi-otra-yo",
+            title_type="series",
+            type="video",
+            status="ready",
+            scope="title",
+            collection="campaign",
+            move_status="moved",
+            orientation="16:9",
+            primary_theme="relaciones",
+            primary_topic="preocupación",
+            search_text="relaciones dormitorio",
+        )
+        movie = Asset(
+            asset_uid="catalog-movie",
+            source=source,
+            provider="google_drive",
+            remote_path="pelicula-uno.mp4",
+            source_path="pelicula-uno.mp4",
+            drive_file_id="drive-movie",
+            filename="pelicula-uno.mp4",
+            title="Pelicula Uno escena",
+            title_name="Pelicula Uno",
+            title_slug="pelicula-uno",
+            title_type="movie",
+            type="video",
+            status="ready",
+            scope="title",
+            move_status="moved",
+            orientation="16:9",
+        )
+        session.add_all([generic, branded, other_branded, series, movie])
+        session.flush()
+        niche_links = [
+            AssetNiche(asset_id=branded.id, niche_id=beauty.id),
+            AssetNiche(asset_id=branded.id, niche_id=skincare.id),
+            AssetNiche(asset_id=generic.id, niche_id=skincare.id),
+        ]
+        for index in range(50):
+            extra = Asset(
+                asset_uid=f"catalog-brand-extra-{index}",
+                source=source,
+                provider="google_drive",
+                remote_path=f"brand-crema-extra-{index}.mp4",
+                source_path=f"brand-crema-extra-{index}.mp4",
+                drive_file_id=f"drive-brand-extra-{index}",
+                filename=f"brand-crema-extra-{index}.mp4",
+                title=f"Crema facial extra {index}",
+                type="video",
+                status="ready",
+                scope="brand",
+                brand=brand,
+                collection="evergreen",
+                move_status="moved",
+                orientation="9:16",
+                primary_theme="cuidado personal",
+                primary_topic="crema facial",
+                search_text="crema facial belleza",
+            )
+            session.add(extra)
+            session.flush()
+            niche_links.append(AssetNiche(asset_id=extra.id, niche_id=beauty.id))
+        session.add_all(niche_links)
+        ids = {
+            "generic": generic.id,
+            "brand": branded.id,
+            "other_brand": other_branded.id,
+            "series": series.id,
+            "movie": movie.id,
+        }
+        session.commit()
+        return ids
 
 
 def test_assets_gallery_filters_and_pagination(tmp_path: Path, monkeypatch) -> None:
@@ -402,6 +555,181 @@ def test_asset_detail_shows_pilot_fields(tmp_path: Path, monkeypatch) -> None:
     assert "drive-0" in response.text
     assert "classification_ambiguous" in response.text
     assert "Visual presentation" in response.text
+
+
+def test_asset_discard_ready_moved_works(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[1]
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-1"))
+    client = TestClient(app)
+
+    response = client.post(f"/assets/{asset_id}/discard", headers=auth_header(), follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/assets?discarded=true"
+    assert drive.trash_calls == ["drive-1"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is None
+
+
+def test_asset_discard_planned_works(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[1]
+    with session_factory() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        asset.status = "move_planned"
+        asset.move_status = "planned"
+        session.commit()
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-1"))
+    client = TestClient(app)
+
+    response = client.post(f"/assets/{asset_id}/discard", headers=auth_header(), follow_redirects=False)
+
+    assert response.status_code == 303
+    assert drive.trash_calls == ["drive-1"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is None
+
+
+def test_asset_discard_review_works(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[0]
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-0"))
+    client = TestClient(app)
+
+    response = client.post(f"/assets/{asset_id}/discard", headers=auth_header(), follow_redirects=False)
+
+    assert response.status_code == 303
+    assert drive.trash_calls == ["drive-0"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is None
+
+
+def test_asset_discard_drive_failure_keeps_db(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(
+        monkeypatch,
+        FakeDiscardDrive(expected_file_id="drive-1", trash_fails=True),
+    )
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[1]
+    client = TestClient(app)
+
+    response = client.post(f"/assets/{asset_id}/discard", headers=auth_header(), follow_redirects=False)
+
+    assert response.status_code == 502
+    assert drive.trash_calls == ["drive-1"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is not None
+
+
+def test_asset_discard_db_failure_untrashes_drive(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    drive = install_fake_discard_drive(monkeypatch, FakeDiscardDrive(expected_file_id="drive-1"))
+    app, session_factory = make_test_app(tmp_path)
+    asset_id = seed_assets(session_factory)[1]
+    original_commit = Session.commit
+    fail_next_commit = {"enabled": True}
+
+    def fail_commit_once(self):
+        if fail_next_commit["enabled"]:
+            fail_next_commit["enabled"] = False
+            raise RuntimeError("database commit failed")
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", fail_commit_once)
+    client = TestClient(app)
+
+    response = client.post(f"/assets/{asset_id}/discard", headers=auth_header(), follow_redirects=False)
+
+    assert response.status_code == 500
+    assert drive.trash_calls == ["drive-1"]
+    assert drive.untrash_calls == ["drive-1"]
+    with session_factory() as session:
+        assert session.get(Asset, asset_id) is not None
+
+
+def test_catalog_brands_titles_niches_and_filters(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    seed_catalog_scope_assets(session_factory)
+    client = TestClient(app)
+
+    brands = client.get("/brands", headers=auth_header())
+    titles = client.get("/titles", headers=auth_header())
+    niches = client.get("/niches", headers=auth_header())
+    generic = client.get("/assets?scope=generic", headers=auth_header())
+    brand = client.get("/assets?scope=brand&brand=grandiosa-mujer&sort=oldest", headers=auth_header())
+    title = client.get("/assets?scope=title&title_slug=mi-otra-yo", headers=auth_header())
+    niche = client.get("/assets?niche=belleza&sort=oldest", headers=auth_header())
+    combined = client.get("/assets?scope=brand&brand=grandiosa-mujer&q=crema&sort=oldest", headers=auth_header())
+    paged = client.get("/assets?scope=brand&brand=grandiosa-mujer&niche=belleza&q=crema", headers=auth_header())
+
+    assert brands.status_code == 200
+    assert "Grandiosa Mujer" in brands.text
+    assert "/assets?scope=brand&brand=grandiosa-mujer" in brands.text
+    assert titles.status_code == 200
+    assert "Series" in titles.text
+    assert "Películas" in titles.text
+    assert "Mi Otra Yo" in titles.text
+    assert "Pelicula Uno" in titles.text
+    assert "/assets?scope=title&title_slug=mi-otra-yo" in titles.text
+    assert niches.status_code == 200
+    assert "belleza" in niches.text
+    assert "/assets?niche=belleza" in niches.text
+    assert "Clip genérico yoga" in generic.text
+    assert "Mujer aplicando crema facial" not in generic.text
+    assert "Mujer preocupada en dormitorio" not in generic.text
+    assert "Mujer aplicando crema facial" in brand.text
+    assert "Clip genérico yoga" not in brand.text
+    assert "Otra marca asset" not in brand.text
+    assert "Mujer preocupada en dormitorio" in title.text
+    assert "Clip genérico yoga" not in title.text
+    assert "Pelicula Uno escena" not in title.text
+    assert "Mujer aplicando crema facial" in niche.text
+    assert "Clip genérico yoga" not in niche.text
+    assert "Mujer aplicando crema facial" in combined.text
+    assert "Otra marca asset" not in combined.text
+    assert "scope=brand" in paged.text
+    assert "brand=grandiosa-mujer" in paged.text
+    assert "niche=belleza" in paged.text
+    assert "q=crema" in paged.text
+
+
+def test_asset_cards_detail_and_navigation_show_catalog_context(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    app, session_factory = make_test_app(tmp_path)
+    ids = seed_catalog_scope_assets(session_factory)
+    client = TestClient(app)
+
+    assets = client.get("/assets?sort=oldest", headers=auth_header())
+    detail = client.get(f"/assets/{ids['series']}", headers=auth_header())
+
+    assert assets.status_code == 200
+    assert "GENÉRICO" in assets.text
+    assert "MARCA" in assets.text
+    assert "Grandiosa Mujer" in assets.text
+    assert "SERIE" in assets.text
+    assert "PELÍCULA" in assets.text
+    assert "Mi Otra Yo" in assets.text
+    assert "Assets" in assets.text
+    assert "Brands" in assets.text
+    assert "Titles" in assets.text
+    assert "Niches" in assets.text
+    assert "Reviews" in assets.text
+    assert detail.status_code == 200
+    assert "Scope" in detail.text
+    assert "SERIE" in detail.text
+    assert "Title type" in detail.text
+    assert "Mi Otra Yo" in detail.text
+    assert "Contexto" in detail.text
+    assert "campaign" in detail.text
+    assert "Eliminar asset" in detail.text
+    assert "¿Eliminar este asset? Se enviará a la papelera de Google Drive." in detail.text
 
 
 def test_reviews_queue_and_form(tmp_path: Path, monkeypatch) -> None:

@@ -7,6 +7,10 @@
   </div>
 {% endmacro %}
 
+{% macro scope_label(asset) %}
+  {% if asset.scope == "generic" %}GENÉRICO{% elif asset.scope == "brand" %}MARCA{% elif asset.scope == "title" and asset.title_type == "series" %}SERIE{% elif asset.scope == "title" and asset.title_type == "movie" %}PELÍCULA{% elif asset.scope == "title" %}TÍTULO{% else %}{{ asset.scope }}{% endif %}
+{% endmacro %}
+
 {% block content %}
   {% set preview_url = preview_public_url(asset.preview_path) %}
   {% set thumbnail_url = preview_public_url(asset.thumbnail_path) %}
@@ -61,8 +65,14 @@
       <dl class="facts">
         {{ fact("Filename", asset.filename) }}
         {{ fact("Drive file ID", asset.drive_file_id) }}
-        {{ fact("Scope", asset.scope) }}
-        {{ fact("Contexto", asset.title_name or (asset.brand.name if asset.brand else none) or asset.collection) }}
+        {{ fact("Scope", scope_label(asset)) }}
+        {{ fact("Brand", asset.brand.name if asset.brand else none) }}
+        {{ fact("Brand slug", asset.brand.slug if asset.brand else none) }}
+        {{ fact("Collection", asset.collection) }}
+        {{ fact("Title type", asset.title_type) }}
+        {{ fact("Title", asset.title_name or asset.title) }}
+        {{ fact("Title slug", asset.title_slug) }}
+        {{ fact("Contexto", asset.collection) }}
         {{ fact("Ruta actual", asset.source_path or asset.remote_path) }}
         {{ fact("Ruta planeada", asset.remote_path) }}
         {{ fact("Target name", asset.target_name) }}
@@ -92,6 +102,7 @@
         {{ fact("Descripcion", asset.description or ai_result.get("description_es")) }}
         {{ fact("Tema", asset.primary_theme) }}
         {{ fact("Topic", asset.primary_topic) }}
+        {{ fact("Niches", asset.niches | map(attribute="name") | join(", ")) }}
         {{ fact("Contains people", ai_result.get("contains_people")) }}
         {{ fact("People count", ai_result.get("people_count")) }}
         {{ fact("Visual presentation", ai_result.get("visual_presentation")) }}
@@ -148,6 +159,13 @@
         {{ fact("Preview generated at", asset.preview_generated_at) }}
         {{ fact("AI enriched at", asset.ai_enriched_at) }}
       </dl>
+    </section>
+
+    <section class="detail-panel danger-zone">
+      <h2>Acciones destructivas</h2>
+      <form method="post" action="/assets/{{ asset.id }}/discard" onsubmit="return confirm('¿Eliminar este asset? Se enviará a la papelera de Google Drive.');">
+        <button class="button danger" type="submit">Eliminar asset</button>
+      </form>
     </section>
   </div>
 {% endblock %}
