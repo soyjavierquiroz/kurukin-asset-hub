@@ -70,11 +70,9 @@ def route_parts(
     if asset is not None:
         title_slug = asset.title_slug or title_slug
     if request_data.title_type == "movie":
-        return ["30_peliculas_series", "peliculas", title_slug, "brolls-generales", media_type, batch]
-    parts = ["30_peliculas_series", "series", title_slug]
-    if request_data.season is not None and request_data.episode is not None:
-        parts.extend([f"temporada-{request_data.season:02d}", f"episodio-{request_data.episode:02d}"])
-    else:
-        parts.append("brolls-generales")
-    parts.extend([media_type, batch])
-    return parts
+        return ["30_peliculas_series", "peliculas", title_slug, media_type, batch]
+    if request_data.season is not None:
+        format(request_data.season, "02d")
+    if request_data.episode is not None:
+        format(request_data.episode, "02d")
+    return ["30_peliculas_series", "series", title_slug, media_type, batch]

@@ -1245,7 +1245,7 @@ def test_edit_metadata_planned_recalculates_plan_without_drive(tmp_path: Path, m
         asset.target_name = "old__16x9__7a6fdb97.mp4"
         asset.remote_path = f"10_genericos/video/lote-0001/{asset.target_name}"
         asset.source_path = asset.remote_path
-        asset.path_layout_version = "compact_v2"
+        asset.path_layout_version = "compact_v3"
         asset.reviewed_at = datetime.now(UTC)
         old_hash = asset.plan_hash = "old-hash"
         session.commit()
@@ -1306,7 +1306,7 @@ def test_edit_metadata_moved_does_not_call_drive_or_change_move_state(tmp_path: 
         asset.target_name = asset.filename
         asset.remote_path = f"10_genericos/video/lote-0001/{asset.target_name}"
         asset.source_path = asset.remote_path
-        asset.path_layout_version = "compact_v2"
+        asset.path_layout_version = "compact_v3"
         session.commit()
 
     def fail(*_args, **_kwargs):

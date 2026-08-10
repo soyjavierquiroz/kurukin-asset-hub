@@ -110,7 +110,7 @@ PRIMARY_THEMES = {
     "otros",
 }
 REVIEW_PATH = "90_revision/clasificacion-ambigua"
-PATH_LAYOUT_VERSION = "compact_v2"
+PATH_LAYOUT_VERSION = "compact_v3"
 SUPPORTED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/tiff", "image/heic"}
 SUPPORTED_VIDEO_MIMES = {"video/mp4", "video/quicktime", "video/x-matroska", "video/webm"}
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -2115,19 +2115,57 @@ def audit_legacy_layout_assets(
     session: Session,
     drive_client: DriveClient,
     root_folder_id: str,
+    scope: str | None = None,
+    brand_slug: str | None = None,
+    title_slug: str | None = None,
 ) -> list[LegacyLayoutAssetPlan]:
-    assets = session.scalars(
-        select(Asset).where(
-            Asset.move_status == "moved",
-            Asset.drive_file_id.is_not(None),
-        )
-    ).all()
+    query = select(Asset).where(
+        Asset.move_status == "moved",
+        Asset.drive_file_id.is_not(None),
+    )
+    query = apply_layout_scope_filter(query, scope, brand_slug, title_slug)
+    assets = session.scalars(query).all()
     plans: list[LegacyLayoutAssetPlan] = []
     for asset in assets:
         if not asset_is_legacy_layout(asset):
             continue
         plans.append(build_legacy_layout_plan(session, drive_client, root_folder_id, asset))
     return plans
+
+
+def audit_compact_v2_layout_assets(
+    session: Session,
+    drive_client: DriveClient,
+    root_folder_id: str,
+    scope: str,
+    brand_slug: str | None = None,
+    title_slug: str | None = None,
+) -> list[LegacyLayoutAssetPlan]:
+    query = select(Asset).where(
+        Asset.path_layout_version == "compact_v2",
+        Asset.scope == scope,
+        Asset.move_status == "moved",
+        Asset.drive_file_id.is_not(None),
+    )
+    query = apply_layout_scope_filter(query, scope, brand_slug, title_slug)
+    assets = session.scalars(query).all()
+    return [build_compact_v2_to_v3_layout_plan(session, drive_client, root_folder_id, asset) for asset in assets]
+
+
+def apply_layout_scope_filter(
+    query: Any,
+    scope: str | None,
+    brand_slug: str | None,
+    title_slug: str | None,
+) -> Any:
+    if scope is None:
+        return query
+    query = query.where(Asset.scope == scope)
+    if scope == "brand":
+        query = query.join(Asset.brand).where(Brand.slug == brand_slug)
+    if scope == "title":
+        query = query.where(Asset.title_slug == title_slug)
+    return query
 
 
 def asset_is_legacy_layout(asset: Asset) -> bool:
@@ -2175,9 +2213,56 @@ def build_legacy_layout_plan(
         would_remove_parent=current_parent_id,
         would_set_trashed_false=True,
         database_updates={
+            "path_layout_version_before": asset.path_layout_version,
             "path_layout_version": PATH_LAYOUT_VERSION,
             "target_path": target_path,
             "target_name": asset.target_name or metadata.name,
+            "status": asset.status,
+            "move_status": "moved",
+            "plan_hash": "recalculate",
+        },
+    )
+
+
+def build_compact_v2_to_v3_layout_plan(
+    session: Session,
+    drive_client: DriveClient,
+    root_folder_id: str,
+    asset: Asset,
+) -> LegacyLayoutAssetPlan:
+    metadata = drive_client.get_file_metadata(asset.drive_file_id or "")
+    if not metadata.parents:
+        raise LegacyLayoutMigrationError(f"file has no parent: {asset.drive_file_id}")
+    batch_number = stored_batch_number(asset) or 1
+    target_parts = compact_target_parts_for_asset(asset, batch_number)
+    target_name = metadata.name
+    target_path = str(PurePosixPath(*target_parts) / target_name)
+    target_parent_id = existing_compact_folder_id(session, asset, root_folder_id, batch_number)
+    current_parent_id = metadata.parents[0]
+    return LegacyLayoutAssetPlan(
+        drive_file_id=asset.drive_file_id or "",
+        status=asset.status,
+        move_status=asset.move_status,
+        scope=asset.scope or "",
+        current_name=metadata.name,
+        current_parent_id=current_parent_id,
+        current_path=asset.remote_path or "",
+        target_name=target_name,
+        compact_target_path=target_path,
+        compact_target_parts=target_parts,
+        target_parent_id=target_parent_id,
+        trashed=metadata.trashed,
+        size=metadata.size,
+        mime_type=metadata.mime_type,
+        name_changed=False,
+        would_add_parent=target_parent_id or str(PurePosixPath(root_folder_id, *target_parts)),
+        would_remove_parent=current_parent_id,
+        would_set_trashed_false=True,
+        database_updates={
+            "path_layout_version_before": asset.path_layout_version,
+            "path_layout_version": PATH_LAYOUT_VERSION,
+            "target_path": target_path,
+            "target_name": target_name,
             "status": asset.status,
             "move_status": "moved",
             "plan_hash": "recalculate",
@@ -2190,14 +2275,28 @@ def migrate_legacy_layout_assets(
     drive_client: DriveClient,
     root_folder_id: str,
     expected_file_ids: set[str] | None = None,
+    from_layout: str = "legacy",
+    to_layout: str = "compact_v3",
+    scope: str | None = None,
+    brand_slug: str | None = None,
+    title_slug: str | None = None,
     simulate: bool = True,
     cleanup_empty_folders: bool = False,
 ) -> LegacyLayoutMigrationResult:
+    if to_layout != PATH_LAYOUT_VERSION:
+        raise LegacyLayoutMigrationError(f"unsupported target layout: {to_layout}")
+    if from_layout not in {"legacy", "compact_v2"}:
+        raise LegacyLayoutMigrationError(f"unsupported source layout: {from_layout}")
     result = LegacyLayoutMigrationResult(simulated=simulate)
     if not acquire_batch_lock(session):
         raise BatchLockUnavailable("managed Drive batch lock is not available")
     try:
-        plans = audit_legacy_layout_assets(session, drive_client, root_folder_id)
+        if from_layout == "compact_v2":
+            if scope is None:
+                raise LegacyLayoutMigrationError("--from compact_v2 requires --scope")
+            plans = audit_compact_v2_layout_assets(session, drive_client, root_folder_id, scope, brand_slug, title_slug)
+        else:
+            plans = audit_legacy_layout_assets(session, drive_client, root_folder_id, scope, brand_slug, title_slug)
         result.plans = plans
         result.assets_detected = [plan.drive_file_id for plan in plans]
         if expected_file_ids is not None and set(result.assets_detected) != expected_file_ids:
@@ -2226,41 +2325,57 @@ def migrate_legacy_layout_assets(
             before = drive_client.get_file_metadata(plan.drive_file_id)
             if before.size != plan.size or before.mime_type != plan.mime_type:
                 raise LegacyLayoutMigrationError(f"file changed before migration: {plan.drive_file_id}")
-            drive_client.rename_and_move_file(
-                plan.drive_file_id,
-                plan.target_name,
-                target_parent_id,
-                plan.current_parent_id,
-            )
+            try:
+                drive_client.rename_and_move_file(
+                    plan.drive_file_id,
+                    plan.target_name,
+                    target_parent_id,
+                    plan.current_parent_id,
+                )
+            except Exception:
+                session.rollback()
+                raise
             result.drive_mutations += 1
-            after = drive_client.get_file_metadata(plan.drive_file_id)
-            if not legacy_migration_verified(after, plan, target_parent_id):
-                raise LegacyLayoutMigrationError(f"verification failed: {plan.drive_file_id}")
-            if old_folder is not None:
-                old_folder.item_count = max(0, old_folder.item_count - 1)
-            compact_folder = session.scalar(
-                select(ManagedDriveFolder).where(ManagedDriveFolder.drive_folder_id == target_parent_id)
-            )
-            if compact_folder is not None:
-                compact_folder.item_count += 1
-            asset.remote_path = plan.compact_target_path
-            asset.source_path = plan.compact_target_path
-            asset.target_parent_id = target_parent_id
-            asset.target_name = plan.target_name
-            asset.path_layout_version = PATH_LAYOUT_VERSION
-            asset.move_status = "moved"
-            asset.plan_version = PLAN_VERSION
-            asset.plan_hash = compute_plan_hash(asset, plan.compact_target_path, plan.target_name, stored_batch_number(asset))
-            if asset.status == "review_required":
-                result.review_migrated += 1
-            elif asset.scope == "generic":
-                result.generic_migrated += 1
-            elif asset.scope == "brand":
-                result.brand_migrated += 1
-            elif asset.scope == "title":
-                result.title_migrated += 1
-            result.assets_migrated += 1
-            session.commit()
+            try:
+                after = drive_client.get_file_metadata(plan.drive_file_id)
+                if not legacy_migration_verified(after, plan, target_parent_id):
+                    raise LegacyLayoutMigrationError(f"verification failed: {plan.drive_file_id}")
+                if old_folder is not None:
+                    old_folder.item_count = max(0, old_folder.item_count - 1)
+                compact_folder = session.scalar(
+                    select(ManagedDriveFolder).where(ManagedDriveFolder.drive_folder_id == target_parent_id)
+                )
+                if compact_folder is not None:
+                    compact_folder.item_count += 1
+                asset.remote_path = plan.compact_target_path
+                asset.source_path = plan.compact_target_path
+                asset.target_parent_id = target_parent_id
+                asset.target_name = plan.target_name
+                asset.path_layout_version = PATH_LAYOUT_VERSION
+                asset.move_status = "moved"
+                asset.plan_version = PLAN_VERSION
+                asset.plan_hash = compute_plan_hash(
+                    asset,
+                    plan.compact_target_path,
+                    plan.target_name,
+                    stored_batch_number(asset),
+                )
+                if asset.status == "review_required":
+                    result.review_migrated += 1
+                elif asset.scope == "generic":
+                    result.generic_migrated += 1
+                elif asset.scope == "brand":
+                    result.brand_migrated += 1
+                elif asset.scope == "title":
+                    result.title_migrated += 1
+                result.assets_migrated += 1
+                session.commit()
+            except Exception:
+                session.rollback()
+                restored = drive_client.restore_file_location(plan.drive_file_id, plan.current_name, plan.current_parent_id)
+                if not legacy_migration_restored(restored, plan):
+                    raise LegacyLayoutMigrationError(f"rollback failed: {plan.drive_file_id}")
+                raise
 
         if cleanup_empty_folders:
             cleanup_start_ids = [
@@ -2296,18 +2411,8 @@ def compact_target_parts_for_asset(asset: Asset, batch_number: int) -> list[str]
         return ["20_marcas", brand_slug, asset.collection or "evergreen", media_type, batch]
     title_slug = asset.title_slug or slugify(asset.title_name or "")
     if asset.title_type == "series":
-        if asset.season_number is not None and asset.episode_number is not None:
-            return [
-                "30_peliculas_series",
-                "series",
-                title_slug,
-                f"temporada-{asset.season_number:02d}",
-                f"episodio-{asset.episode_number:02d}",
-                media_type,
-                batch,
-            ]
-        return ["30_peliculas_series", "series", title_slug, "brolls-generales", media_type, batch]
-    return ["30_peliculas_series", "peliculas", title_slug, "brolls-generales", media_type, batch]
+        return ["30_peliculas_series", "series", title_slug, media_type, batch]
+    return ["30_peliculas_series", "peliculas", title_slug, media_type, batch]
 
 
 def existing_compact_folder_id(
@@ -2384,6 +2489,15 @@ def legacy_migration_verified(metadata: DriveFile, plan: LegacyLayoutAssetPlan, 
         and plan.current_parent_id not in metadata.parents
         and metadata.size == plan.size
         and metadata.mime_type == plan.mime_type
+        and not metadata.trashed
+    )
+
+
+def legacy_migration_restored(metadata: DriveFile, plan: LegacyLayoutAssetPlan) -> bool:
+    return (
+        metadata.id == plan.drive_file_id
+        and metadata.name == plan.current_name
+        and plan.current_parent_id in metadata.parents
         and not metadata.trashed
     )
 

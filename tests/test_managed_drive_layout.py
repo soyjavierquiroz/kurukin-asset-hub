@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -50,7 +51,7 @@ def test_moved_helpers_are_not_duplicated_in_facade() -> None:
     assert MOVED_FUNCTIONS.issubset(layout_defs)
 
 
-def test_route_parts_keeps_compact_v2_generic_brand_title_and_review_paths() -> None:
+def test_route_parts_keeps_compact_v3_generic_brand_title_and_review_paths() -> None:
     generic = layout.route_parts(
         request_for("generic"),
         None,
@@ -87,12 +88,38 @@ def test_route_parts_keeps_compact_v2_generic_brand_title_and_review_paths() -> 
         "30_peliculas_series",
         "series",
         "mi-otra-yo",
-        "temporada-01",
-        "episodio-03",
         "video",
         "lote-0001",
     ]
     assert review == ["90_revision", "title", "rocky", "video", "lote-0001"]
+
+
+def test_title_series_path_omits_title_context() -> None:
+    parts = layout.route_parts(
+        request_for("title", title_type="series", title="Mi otra yo", season=1, episode=3),
+        None,
+        "video",
+        Classification("personas", "bienestar yoga"),
+        "vertical-9x16",
+    )
+    path = str(PurePosixPath(*parts) / "file.mp4")
+
+    assert path == "30_peliculas_series/series/mi-otra-yo/video/lote-0001/file.mp4"
+    assert "brolls-generales" not in path
+    assert "temporada-01" not in path
+    assert "episodio-03" not in path
+
+
+def test_title_movie_path_omits_title_context() -> None:
+    parts = layout.route_parts(
+        request_for("title", title_type="movie", title="Rocky"),
+        None,
+        "video",
+        Classification("personas", "bienestar yoga"),
+        "horizontal-16x9",
+    )
+
+    assert str(PurePosixPath(*parts) / "file.mp4") == "30_peliculas_series/peliculas/rocky/video/lote-0001/file.mp4"
 
 
 def test_context_and_slugs_keep_existing_precedence() -> None:

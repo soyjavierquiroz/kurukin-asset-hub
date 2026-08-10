@@ -51,8 +51,8 @@ def session() -> Session:
         yield db_session
 
 
-def test_path_layout_version_remains_compact_v2() -> None:
-    assert PATH_LAYOUT_VERSION == "compact_v2"
+def test_path_layout_version_remains_compact_v3() -> None:
+    assert PATH_LAYOUT_VERSION == "compact_v3"
 
 
 class FakeDrive:
@@ -330,7 +330,7 @@ def test_movie_route(session: Session) -> None:
         ai(),
     )[0]
 
-    assert plan.target_path.startswith("30_peliculas_series/peliculas/rocky/brolls-generales/video/lote-0001/")
+    assert plan.target_path.startswith("30_peliculas_series/peliculas/rocky/video/lote-0001/")
 
 
 def test_title_brolls_compact_path(session: Session) -> None:
@@ -343,7 +343,8 @@ def test_title_brolls_compact_path(session: Session) -> None:
         ai(),
     )[0]
 
-    assert plan.target_path.startswith("30_peliculas_series/series/mi-otra-yo/brolls-generales/video/lote-0001/")
+    assert plan.target_path.startswith("30_peliculas_series/series/mi-otra-yo/video/lote-0001/")
+    assert "brolls-generales" not in plan.target_path
 
 
 def test_title_season_episode_compact_path(session: Session) -> None:
@@ -356,9 +357,16 @@ def test_title_season_episode_compact_path(session: Session) -> None:
         ai(),
     )[0]
 
-    assert plan.target_path.startswith(
-        "30_peliculas_series/series/mi-otra-yo/temporada-01/episodio-02/video/lote-0001/"
-    )
+    assert plan.target_path.startswith("30_peliculas_series/series/mi-otra-yo/video/lote-0001/")
+    assert "temporada-01" not in plan.target_path
+    assert "episodio-02" not in plan.target_path
+    asset = session.get(Asset, plan.asset_id)
+    assert asset is not None
+    assert asset.title_name == "Mi otra yo"
+    assert asset.title_slug == "mi-otra-yo"
+    assert asset.title_type == "series"
+    assert asset.season_number == 1
+    assert asset.episode_number == 2
 
 
 def test_review_compact_path(session: Session) -> None:
@@ -394,7 +402,9 @@ def test_series_route(session: Session) -> None:
         ai(),
     )[0]
 
-    assert "series/nombre-serie/temporada-01/episodio-02/video" in plan.target_path
+    assert "series/nombre-serie/video" in plan.target_path
+    assert "temporada-01" not in plan.target_path
+    assert "episodio-02" not in plan.target_path
 
 
 def test_series_route_without_episode_uses_general_broll(session: Session) -> None:
@@ -407,7 +417,8 @@ def test_series_route_without_episode_uses_general_broll(session: Session) -> No
         ai(),
     )[0]
 
-    assert "series/nombre-serie/brolls-generales/video" in plan.target_path
+    assert "series/nombre-serie/video" in plan.target_path
+    assert "brolls-generales" not in plan.target_path
 
 
 def test_batch_creation_uses_next_batch(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -865,7 +876,7 @@ def test_apply_reuses_persisted_plan_and_does_not_call_ai_or_change_fields(sessi
     assert applied.target_name == "approved.mp4"
     assert applied.target_path == "10_genericos/video/lote-0001/approved.mp4"
     assert applied.target_batch == 1
-    assert applied.path_layout_version == "compact_v2"
+    assert applied.path_layout_version == "compact_v3"
 
 
 def test_persisted_plan_with_legacy_analysis_does_not_change_in_dry_run(session: Session) -> None:
@@ -927,13 +938,49 @@ def test_replan_local_old_layout_does_not_call_ai(session: Session) -> None:
 
     assert replanned.target_path.startswith("10_genericos/video/lote-0001/")
     assert replanned.target_name == dry.target_name
-    assert replanned.path_layout_version == "compact_v2"
+    assert replanned.path_layout_version == "compact_v3"
 
 
-def test_apply_reuses_compact_v2_plan(session: Session) -> None:
+def test_replan_title_old_layout_uses_new_route(session: Session) -> None:
+    drive = FakeDrive()
+    dry = ingest_drive_assets(
+        session,
+        request_for("title", title_type="series", title="Mi otra yo", season=1, episode=2),
+        drive,
+        technical,
+        preview,
+        ai(),
+    )[0]
+    asset = session.get(Asset, dry.asset_id)
+    assert asset is not None
+    asset.remote_path = f"30_peliculas_series/series/mi-otra-yo/temporada-01/episodio-02/video/lote-0001/{asset.target_name}"
+    asset.source_path = asset.remote_path
+    asset.path_layout_version = "compact_v2"
+    asset.plan_hash = compute_plan_hash(asset, asset.remote_path, asset.target_name or asset.filename, 1)
+    session.commit()
+
+    def forbidden_ai(_asset: Asset, _path: Path, _preview: PreviewResult) -> ManagedAIResult:
+        raise AssertionError("AI must not be called")
+
+    replanned = ingest_drive_assets(
+        session,
+        request_for("title", title_type="series", title="Mi otra yo", season=1, episode=2),
+        drive,
+        technical,
+        preview,
+        forbidden_ai,
+    )[0]
+
+    assert replanned.target_path.startswith("30_peliculas_series/series/mi-otra-yo/video/lote-0001/")
+    assert "temporada-01" not in replanned.target_path
+    assert "episodio-02" not in replanned.target_path
+    assert replanned.path_layout_version == "compact_v3"
+
+
+def test_apply_reuses_compact_v3_plan(session: Session) -> None:
     drive = FakeDrive()
     dry = ingest_drive_assets(session, request_for("generic"), drive, technical, preview, ai())[0]
-    assert dry.path_layout_version == "compact_v2"
+    assert dry.path_layout_version == "compact_v3"
 
     def forbidden_ai(_asset: Asset, _path: Path, _preview: PreviewResult) -> ManagedAIResult:
         raise AssertionError("AI must not be called")
@@ -948,8 +995,41 @@ def test_apply_reuses_compact_v2_plan(session: Session) -> None:
     )[0]
 
     assert applied.result == "applied"
-    assert applied.path_layout_version == "compact_v2"
+    assert applied.path_layout_version == "compact_v3"
     assert applied.target_path == dry.target_path
+
+
+def test_apply_title_uses_persisted_new_target_path(session: Session) -> None:
+    drive = FakeDrive()
+    dry = ingest_drive_assets(
+        session,
+        request_for("title", title_type="series", title="Mi otra yo", season=1, episode=2),
+        drive,
+        technical,
+        preview,
+        ai(),
+    )[0]
+    assert dry.target_path.startswith("30_peliculas_series/series/mi-otra-yo/video/lote-0001/")
+
+    def forbidden_ai(_asset: Asset, _path: Path, _preview: PreviewResult) -> ManagedAIResult:
+        raise AssertionError("AI must not be called")
+
+    applied = ingest_drive_assets(
+        session,
+        request_for("title", title_type="series", title="Mi otra yo", season=1, episode=2, apply=True, dry_run=False),
+        drive,
+        technical,
+        preview,
+        forbidden_ai,
+    )[0]
+    asset = session.get(Asset, dry.asset_id)
+
+    assert asset is not None
+    assert applied.result == "applied"
+    assert applied.target_path == dry.target_path
+    assert asset.remote_path == dry.target_path
+    assert "temporada-01" not in asset.remote_path
+    assert "episodio-02" not in asset.remote_path
 
 
 def test_replan_allows_recalculation(session: Session) -> None:
@@ -1542,6 +1622,96 @@ def add_legacy_asset(
     return asset
 
 
+def add_compact_v2_asset(
+    session: Session,
+    drive: FakeDrive,
+    drive_file_id: str = "compact-v2-1",
+    title_slug: str = "mi-otra-yo",
+    old_parent_id: str = "compact-v2-leaf",
+    filename: str = "file.mp4",
+    status: str = "ready",
+    move_status: str = "moved",
+    layout_version: str | None = "compact_v2",
+) -> Asset:
+    source = get_or_create_pilot_source(session)
+    old_path = f"30_peliculas_series/series/{title_slug}/brolls-generales/video/lote-0001/{filename}"
+    drive.files[old_parent_id] = DriveFile(
+        id=old_parent_id,
+        name="lote-0001",
+        mime_type="application/vnd.google-apps.folder",
+        parents=["compact-v2-video"],
+    )
+    drive.files["compact-v2-video"] = DriveFile(
+        id="compact-v2-video",
+        name="video",
+        mime_type="application/vnd.google-apps.folder",
+        parents=["compact-v2-context"],
+    )
+    drive.files["compact-v2-context"] = DriveFile(
+        id="compact-v2-context",
+        name="brolls-generales",
+        mime_type="application/vnd.google-apps.folder",
+        parents=["root"],
+    )
+    drive.files[drive_file_id] = DriveFile(
+        id=drive_file_id,
+        name=filename,
+        mime_type="video/mp4",
+        parents=[old_parent_id],
+        size=123,
+        modified_time=datetime(2026, 8, 3, tzinfo=UTC),
+        capabilities={"canEdit": True, "canMoveItemWithinDrive": True, "canUntrash": True},
+    )
+    asset = Asset(
+        asset_uid=f"drive-{drive_file_id}",
+        source=source,
+        provider="google_drive",
+        remote_path=old_path,
+        source_path=old_path,
+        drive_file_id=drive_file_id,
+        remote_file_id=drive_file_id,
+        filename=filename,
+        original_name=filename,
+        original_parent_id="inbox",
+        target_parent_id=old_parent_id,
+        target_name=filename,
+        scope="title",
+        title_type="series",
+        title_name="Mi otra yo" if title_slug == "mi-otra-yo" else title_slug,
+        title_slug=title_slug,
+        type="video",
+        mime_type="video/mp4",
+        primary_theme="personas",
+        primary_topic="bienestar yoga",
+        orientation="vertical-9x16",
+        thumbnail_path="pilot-previews/1/thumbnail.webp",
+        status=status,
+        move_status=move_status,
+        path_layout_version=layout_version,
+    )
+    session.add(asset)
+    session.flush()
+    session.add(
+        ManagedDriveFolder(
+            drive_folder_id=old_parent_id,
+            root_folder_id="root",
+            scope="title",
+            title_slug=asset.title_slug,
+            title_type=asset.title_type,
+            media_type="video",
+            path_layout_version="compact_v2",
+            context_slug=asset.title_slug,
+            primary_theme=None,
+            primary_topic="compact",
+            orientation="compact",
+            batch_number=1,
+            item_count=1,
+        )
+    )
+    session.commit()
+    return asset
+
+
 def test_legacy_audit_detects_only_legacy_assets(session: Session) -> None:
     drive = FakeDrive()
     legacy = add_legacy_asset(session, drive)
@@ -1552,7 +1722,7 @@ def test_legacy_audit_detects_only_legacy_assets(session: Session) -> None:
         old_parent_id="compact-folder",
         old_path="10_genericos/video/lote-0001/compact.mp4",
     )
-    compact.path_layout_version = "compact_v2"
+    compact.path_layout_version = "compact_v3"
     compact.remote_path = "10_genericos/video/lote-0001/name.mp4"
     session.commit()
 
@@ -1569,13 +1739,13 @@ def test_legacy_migration_conserves_file_id_name_and_moves_item_count(session: S
     result = migrate_legacy_layout_assets(session, drive, "root", {asset.drive_file_id}, simulate=False)
     session.refresh(asset)
     old_folder = session.scalar(select(ManagedDriveFolder).where(ManagedDriveFolder.drive_folder_id == "old-leaf"))
-    compact_folder = session.scalar(select(ManagedDriveFolder).where(ManagedDriveFolder.path_layout_version == "compact_v2"))
+    compact_folder = session.scalar(select(ManagedDriveFolder).where(ManagedDriveFolder.path_layout_version == "compact_v3"))
 
     assert result.assets_migrated == 1
     assert drive.files[asset.drive_file_id].id == asset.drive_file_id
     assert drive.files[asset.drive_file_id].name == "name.mp4"
     assert asset.remote_path == "10_genericos/video/lote-0001/name.mp4"
-    assert asset.path_layout_version == "compact_v2"
+    assert asset.path_layout_version == "compact_v3"
     assert old_folder.item_count == 0
     assert compact_folder.item_count == 1
 
@@ -1664,6 +1834,210 @@ def test_legacy_migration_fails_on_unexpected_asset_before_mutating(session: Ses
         migrate_legacy_layout_assets(session, drive, "root", {"other"}, simulate=False)
 
     assert drive.moves == []
+
+
+def test_compact_v2_to_compact_v3_title_removes_title_context_from_path(session: Session) -> None:
+    drive = FakeDrive()
+    asset = add_compact_v2_asset(session, drive)
+
+    result = migrate_legacy_layout_assets(
+        session,
+        drive,
+        "root",
+        {asset.drive_file_id},
+        from_layout="compact_v2",
+        to_layout="compact_v3",
+        scope="title",
+        title_slug="mi-otra-yo",
+        simulate=True,
+    )
+
+    assert result.plans[0].current_path == "30_peliculas_series/series/mi-otra-yo/brolls-generales/video/lote-0001/file.mp4"
+    assert result.plans[0].compact_target_path == "30_peliculas_series/series/mi-otra-yo/video/lote-0001/file.mp4"
+    assert result.drive_mutations == 0
+
+
+def test_compact_v2_dry_run_does_not_mutate_drive_or_db(session: Session) -> None:
+    drive = FakeDrive()
+    asset = add_compact_v2_asset(session, drive)
+    snapshot = (asset.remote_path, asset.source_path, asset.path_layout_version, asset.move_status, asset.target_parent_id)
+
+    result = migrate_legacy_layout_assets(
+        session,
+        drive,
+        "root",
+        {asset.drive_file_id},
+        from_layout="compact_v2",
+        to_layout="compact_v3",
+        scope="title",
+        title_slug="mi-otra-yo",
+        simulate=True,
+    )
+    session.refresh(asset)
+
+    assert result.drive_mutations == 0
+    assert drive.moves == []
+    assert (asset.remote_path, asset.source_path, asset.path_layout_version, asset.move_status, asset.target_parent_id) == snapshot
+
+
+def test_compact_v2_title_filter_only_selects_requested_title(session: Session) -> None:
+    drive = FakeDrive()
+    selected = add_compact_v2_asset(session, drive, drive_file_id="selected", title_slug="mi-otra-yo")
+    other = add_compact_v2_asset(session, drive, drive_file_id="other-title", title_slug="otra-serie", old_parent_id="other-leaf")
+
+    result = migrate_legacy_layout_assets(
+        session,
+        drive,
+        "root",
+        from_layout="compact_v2",
+        to_layout="compact_v3",
+        scope="title",
+        title_slug="mi-otra-yo",
+        simulate=True,
+    )
+
+    assert result.assets_detected == [selected.drive_file_id]
+    assert other.drive_file_id not in result.assets_detected
+
+
+def test_compact_v2_migration_omits_existing_compact_v3_and_planned(session: Session) -> None:
+    drive = FakeDrive()
+    add_compact_v2_asset(session, drive, drive_file_id="moved-v2")
+    existing_v3 = add_compact_v2_asset(
+        session,
+        drive,
+        drive_file_id="existing-v3",
+        old_parent_id="existing-v3-leaf",
+        filename="existing-v3.mp4",
+        layout_version="compact_v3",
+    )
+    planned_v3 = add_compact_v2_asset(
+        session,
+        drive,
+        drive_file_id="planned-v3",
+        old_parent_id="planned-v3-leaf",
+        filename="planned-v3.mp4",
+        move_status="planned",
+        layout_version="compact_v3",
+    )
+
+    result = migrate_legacy_layout_assets(
+        session,
+        drive,
+        "root",
+        from_layout="compact_v2",
+        to_layout="compact_v3",
+        scope="title",
+        title_slug="mi-otra-yo",
+        simulate=True,
+    )
+
+    assert result.assets_detected == ["moved-v2"]
+    assert existing_v3.drive_file_id not in result.assets_detected
+    assert planned_v3.drive_file_id not in result.assets_detected
+
+
+def test_compact_v2_apply_conserves_file_id_filename_and_ready_moved(session: Session) -> None:
+    drive = FakeDrive()
+    asset = add_compact_v2_asset(session, drive, filename="Keep Name.MP4")
+
+    result = migrate_legacy_layout_assets(
+        session,
+        drive,
+        "root",
+        {asset.drive_file_id},
+        from_layout="compact_v2",
+        to_layout="compact_v3",
+        scope="title",
+        title_slug="mi-otra-yo",
+        simulate=False,
+    )
+    session.refresh(asset)
+
+    assert result.assets_migrated == 1
+    assert drive.files[asset.drive_file_id].id == asset.drive_file_id
+    assert drive.files[asset.drive_file_id].name == "Keep Name.MP4"
+    assert asset.target_name == "Keep Name.MP4"
+    assert asset.status == "ready"
+    assert asset.move_status == "moved"
+    assert asset.path_layout_version == "compact_v3"
+    assert asset.remote_path == "30_peliculas_series/series/mi-otra-yo/video/lote-0001/Keep Name.MP4"
+
+
+def test_compact_v2_drive_failure_leaves_db_intact(session: Session) -> None:
+    drive = FakeDrive(fail_move=True)
+    asset = add_compact_v2_asset(session, drive)
+    snapshot = (asset.remote_path, asset.source_path, asset.path_layout_version, asset.move_status, asset.target_parent_id)
+
+    with pytest.raises(RuntimeError, match="move failed"):
+        migrate_legacy_layout_assets(
+            session,
+            drive,
+            "root",
+            {asset.drive_file_id},
+            from_layout="compact_v2",
+            to_layout="compact_v3",
+            scope="title",
+            title_slug="mi-otra-yo",
+            simulate=False,
+        )
+    session.refresh(asset)
+
+    assert (asset.remote_path, asset.source_path, asset.path_layout_version, asset.move_status, asset.target_parent_id) == snapshot
+
+
+def test_compact_v2_db_failure_rolls_back_drive(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    drive = FakeDrive()
+    asset = add_compact_v2_asset(session, drive)
+    original_parent = asset.target_parent_id
+    original_path = asset.remote_path
+
+    def fail_commit() -> None:
+        raise RuntimeError("db failed")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+
+    with pytest.raises(RuntimeError, match="db failed"):
+        migrate_legacy_layout_assets(
+            session,
+            drive,
+            "root",
+            {asset.drive_file_id},
+            from_layout="compact_v2",
+            to_layout="compact_v3",
+            scope="title",
+            title_slug="mi-otra-yo",
+            simulate=False,
+        )
+    session.refresh(asset)
+
+    assert drive.restores == [(asset.drive_file_id, "file.mp4", original_parent)]
+    assert drive.files[asset.drive_file_id].parents == [original_parent]
+    assert asset.remote_path == original_path
+    assert asset.path_layout_version == "compact_v2"
+
+
+def test_compact_v2_layout_migration_does_not_call_ai(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.services.managed_drive_pilot as pilot
+
+    monkeypatch.setattr(pilot, "call_nvidia_vision", lambda *_args, **_kwargs: pytest.fail("NVIDIA used"))
+    monkeypatch.setattr(pilot, "call_openai_vision", lambda *_args, **_kwargs: pytest.fail("OpenAI used"))
+    drive = FakeDrive()
+    asset = add_compact_v2_asset(session, drive)
+
+    result = migrate_legacy_layout_assets(
+        session,
+        drive,
+        "root",
+        {asset.drive_file_id},
+        from_layout="compact_v2",
+        to_layout="compact_v3",
+        scope="title",
+        title_slug="mi-otra-yo",
+        simulate=False,
+    )
+
+    assert result.assets_migrated == 1
 
 
 class FakeDriveService:

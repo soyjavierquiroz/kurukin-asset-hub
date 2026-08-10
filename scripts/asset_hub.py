@@ -118,8 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     layout = drive_subparsers.add_parser("layout", parents=[common])
     layout_subparsers = layout.add_subparsers(dest="layout_action", required=True)
     migrate = layout_subparsers.add_parser("migrate", parents=[common])
-    migrate.add_argument("--from", dest="from_layout", required=True, choices=["legacy"])
-    migrate.add_argument("--to", dest="to_layout", required=True, choices=["compact_v2"])
+    migrate.add_argument("--from", dest="from_layout", required=True, choices=["legacy", "compact_v2"])
+    migrate.add_argument("--to", dest="to_layout", required=True, choices=["compact_v3"])
+    migrate.add_argument("--scope", choices=["generic", "brand", "title"])
+    migrate.add_argument("--brand", dest="brand_slug")
+    migrate.add_argument("--title", dest="title_slug")
     migrate.add_argument("--apply", action="store_true")
     migrate.add_argument("--delete-empty-folders", action="store_true")
 
@@ -297,21 +300,42 @@ def handle_review(args: argparse.Namespace, session: Session) -> int:
 def handle_layout(args: argparse.Namespace, session: Session) -> int:
     if args.layout_action != "migrate":
         return EXIT_INVALID_CONFIG
+    validate_layout_migrate_args(args)
     if args.delete_empty_folders and not args.apply:
         raise ValueError("--delete-empty-folders requires --apply")
     assert_pilot_database(session) if args.apply else None
     settings = get_settings()
     if not settings.google_drive_root_folder_id:
         raise ValueError("GOOGLE_DRIVE_ROOT_FOLDER_ID is required")
+    read_client = drive_client_from_environment()
+    drive_client = mutation_client_for_apply(read_client) if args.apply else read_client
     result = migrate_legacy_layout_assets(
         session,
-        drive_client_from_environment(),
+        drive_client,
         settings.google_drive_root_folder_id,
+        from_layout=args.from_layout,
+        to_layout=args.to_layout,
+        scope=args.scope,
+        brand_slug=args.brand_slug,
+        title_slug=args.title_slug,
         simulate=not args.apply,
         cleanup_empty_folders=args.delete_empty_folders,
     )
     output(args, result.to_dict(), layout_lines(result.to_dict()))
     return EXIT_SUCCESS
+
+
+def validate_layout_migrate_args(args: argparse.Namespace) -> None:
+    if args.to_layout != "compact_v3":
+        raise ValueError(f"unsupported target layout: {args.to_layout}")
+    if args.from_layout not in {"legacy", "compact_v2"}:
+        raise ValueError(f"unsupported source layout: {args.from_layout}")
+    if args.scope == "title" and not args.title_slug:
+        raise ValueError("--scope title requires --title")
+    if args.scope == "brand" and not args.brand_slug:
+        raise ValueError("--scope brand requires --brand")
+    if args.from_layout == "compact_v2" and not args.scope:
+        raise ValueError("--from compact_v2 requires --scope")
 
 
 def handle_doctor(args: argparse.Namespace) -> int:
@@ -581,15 +605,39 @@ def row_lines(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def layout_lines(data: dict[str, Any]) -> list[str]:
-    return [
+    assets_matched = len(data["assets_detected"])
+    assets_to_move = sum(
+        1 for plan in data.get("plans", []) if plan.get("current_path") != plan.get("compact_target_path")
+    )
+    lines = [
         f"SIMULATED={'YES' if data['simulated'] else 'NO'}",
         f"ASSETS_DETECTED={len(data['assets_detected'])}",
+        f"ASSETS_MATCHED={assets_matched}",
+        f"ASSETS_TO_MOVE={assets_to_move}",
+        f"ASSETS_SKIPPED={assets_matched - assets_to_move}",
         f"ASSETS_MIGRATED={data['assets_migrated']}",
         f"FOLDERS_CREATED={data['folders_created']}",
         f"FOLDERS_DELETED={data['folders_deleted']}",
+        "FILES_FAILED=0",
         f"DRIVE_MUTATIONS={data['drive_mutations']}",
         f"DUPLICATES={data['duplicates']}",
     ]
+    for plan in data.get("plans", []):
+        changed = "yes" if plan.get("current_path") != plan.get("compact_target_path") else "no"
+        updates = plan.get("database_updates", {})
+        lines.append(
+            " ".join(
+                (
+                    f"drive_file_id={plan.get('drive_file_id') or ''}",
+                    f"path_before={plan.get('current_path') or ''}",
+                    f"path_after={plan.get('compact_target_path') or ''}",
+                    f"layout_before={updates.get('path_layout_version_before') or ''}",
+                    f"layout_after={updates.get('path_layout_version') or ''}",
+                    f"changed={changed}",
+                )
+            )
+        )
+    return lines
 
 
 def replan_lines(data: dict[str, Any]) -> list[str]:

@@ -185,7 +185,7 @@ def test_doctor_does_not_call_ai_without_check_ai(tmp_path: Path, monkeypatch: p
     assert code == 0
 
 
-def test_review_approve_preserves_scope_and_recalculates_compact_v2(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_review_approve_preserves_scope_and_recalculates_compact_v3(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "root")
     from app.config import get_settings
 
@@ -206,7 +206,7 @@ def test_review_approve_preserves_scope_and_recalculates_compact_v2(session: Ses
     assert row.scope == "brand"
     assert row.status == "move_planned"
     assert row.move_status == "planned"
-    assert row.path_layout_version == "compact_v2"
+    assert row.path_layout_version == "compact_v3"
     assert row.target_path and row.target_path.startswith("20_marcas/")
     assert asset.plan_hash != old_hash
 
@@ -233,11 +233,101 @@ def test_layout_migrate_is_simulation_by_default(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(asset_hub, "drive_client_from_environment", lambda: object())
     monkeypatch.setattr(asset_hub, "migrate_legacy_layout_assets", fake_migrate)
 
-    code = asset_hub.main(["--env-file", str(env_file), "drive", "layout", "migrate", "--from", "legacy", "--to", "compact_v2", "--quiet"])
+    code = asset_hub.main(["--env-file", str(env_file), "drive", "layout", "migrate", "--from", "legacy", "--to", "compact_v3", "--quiet"])
 
     assert code == 0
     assert captured["simulate"] is True
     assert captured["cleanup_empty_folders"] is False
+
+
+def test_layout_migrate_compact_v2_title_scope_is_passed_to_migrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_migrate(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "simulated": kwargs["simulate"],
+                "assets_detected": ["file-1"],
+                "assets_migrated": 0,
+                "folders_created": 0,
+                "folders_deleted": 0,
+                "drive_mutations": 0,
+                "duplicates": 0,
+                "plans": [
+                    {
+                        "drive_file_id": "file-1",
+                        "current_path": "30_peliculas_series/series/mi-otra-yo/brolls-generales/video/lote-0001/file.mp4",
+                        "compact_target_path": "30_peliculas_series/series/mi-otra-yo/video/lote-0001/file.mp4",
+                        "database_updates": {
+                            "path_layout_version_before": "compact_v2",
+                            "path_layout_version": "compact_v3",
+                        },
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "drive_client_from_environment", lambda: object())
+    monkeypatch.setattr(asset_hub, "migrate_legacy_layout_assets", fake_migrate)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "drive",
+            "layout",
+            "migrate",
+            "--from",
+            "compact_v2",
+            "--to",
+            "compact_v3",
+            "--scope",
+            "title",
+            "--title",
+            "mi-otra-yo",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert captured["from_layout"] == "compact_v2"
+    assert captured["to_layout"] == "compact_v3"
+    assert captured["scope"] == "title"
+    assert captured["title_slug"] == "mi-otra-yo"
+    assert "ASSETS_MATCHED=1" in output
+    assert "ASSETS_TO_MOVE=1" in output
+    assert "DRIVE_MUTATIONS=0" in output
+    assert "layout_before=compact_v2 layout_after=compact_v3 changed=yes" in output
+
+
+def test_layout_migrate_title_scope_requires_title(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "drive",
+            "layout",
+            "migrate",
+            "--from",
+            "compact_v2",
+            "--to",
+            "compact_v3",
+            "--scope",
+            "title",
+            "--quiet",
+        ]
+    )
+
+    assert code == 2
 
 
 def test_delete_empty_folders_requires_apply(tmp_path: Path) -> None:
@@ -253,7 +343,7 @@ def test_delete_empty_folders_requires_apply(tmp_path: Path) -> None:
             "--from",
             "legacy",
             "--to",
-            "compact_v2",
+            "compact_v3",
             "--delete-empty-folders",
             "--quiet",
         ]
@@ -422,7 +512,7 @@ def add_asset(session: Session, source: Source, file_id: str, status: str, scope
         orientation="horizontal-16x9",
         primary_theme="personas",
         primary_topic="bienestar yoga",
-        path_layout_version="legacy" if status == "review_required" else "compact_v2",
+        path_layout_version="legacy" if status == "review_required" else "compact_v3",
         plan_hash="old-hash",
     )
     session.add(asset)

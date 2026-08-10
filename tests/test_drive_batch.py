@@ -995,7 +995,7 @@ def add_reviewed_placeholder_asset(
         primary_topic="revision manual",
         reviewed_at=datetime(2026, 8, 9, tzinfo=UTC),
         reviewed_by="admin",
-        path_layout_version="compact_v2",
+        path_layout_version="compact_v3",
         plan_version="managed_drive_plan_v2",
     )
     session.add(asset)
