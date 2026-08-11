@@ -254,6 +254,46 @@ class MovedRenameResult:
         }
 
 
+@dataclass(frozen=True)
+class RollbackReconcileResult:
+    dry_run: bool
+    drive_file_id: str
+    current_name: str | None
+    current_parent_id: str | None
+    expected_source_parent_id: str | None
+    expected_target_path: str | None
+    expected_target_parent_id: str | None
+    expected_target_name: str | None
+    reconciliation: str
+    action: str
+    reason: str | None = None
+    status_before: str | None = None
+    status_after: str | None = None
+    move_status_before: str | None = None
+    move_status_after: str | None = None
+    drive_file_id_after: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dry_run": self.dry_run,
+            "drive_file_id": self.drive_file_id,
+            "current_name": self.current_name,
+            "current_parent_id": self.current_parent_id,
+            "expected_source_parent_id": self.expected_source_parent_id,
+            "expected_target_path": self.expected_target_path,
+            "expected_target_parent_id": self.expected_target_parent_id,
+            "expected_target_name": self.expected_target_name,
+            "reconciliation": self.reconciliation,
+            "action": self.action,
+            "reason": self.reason,
+            "status_before": self.status_before,
+            "status_after": self.status_after,
+            "move_status_before": self.move_status_before,
+            "move_status_after": self.move_status_after,
+            "drive_file_id_after": self.drive_file_id_after,
+        }
+
+
 class NvidiaBatchAI:
     def __init__(self, model: str, pause_seconds: float = 0.75) -> None:
         self.model = model
@@ -799,6 +839,275 @@ def approve_review_asset(session: Session, approval: ReviewApproval) -> DriveSta
     rebuild_reviewed_asset_plan(session, asset, apply=True)
     session.commit()
     return drive_status_row(asset)
+
+
+def reconcile_rollback_required_assets(
+    session: Session,
+    drive_client: DriveClient,
+    *,
+    apply: bool = False,
+    limit: int = 500,
+) -> list[RollbackReconcileResult]:
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    assets = session.scalars(
+        select(Asset)
+        .where(
+            Asset.drive_file_id.is_not(None),
+            Asset.status == "review_required",
+            Asset.move_status == "rollback_required",
+        )
+        .order_by(Asset.updated_at.desc(), Asset.id.desc())
+        .limit(limit)
+    ).all()
+    results: list[RollbackReconcileResult] = []
+    for asset in assets:
+        result = reconcile_rollback_required_asset(session, drive_client, asset, apply=apply)
+        results.append(result)
+    return results
+
+
+def reconcile_rollback_required_asset(
+    session: Session,
+    drive_client: DriveClient,
+    asset: Asset,
+    *,
+    apply: bool,
+) -> RollbackReconcileResult:
+    assert asset.drive_file_id is not None
+    status_before = asset.status
+    move_status_before = asset.move_status
+    try:
+        metadata = drive_client.get_file_metadata(asset.drive_file_id)
+    except Exception as exc:
+        return rollback_reconcile_result(
+            asset,
+            dry_run=not apply,
+            reconciliation="manual_required",
+            action="none",
+            reason=f"drive_metadata_error: {sanitize_error_message(str(exc))}",
+            status_before=status_before,
+            status_after=status_before,
+            move_status_before=move_status_before,
+            move_status_after=move_status_before,
+        )
+
+    reconciliation, action, reason = classify_rollback_reconciliation(session, drive_client, asset, metadata)
+    status_after = status_before
+    move_status_after = move_status_before
+    if apply and reconciliation in {"already_at_target", "still_at_source"}:
+        verified_reconciliation, verified_reason = verify_reconciliation_location(
+            session,
+            drive_client,
+            asset,
+            reconciliation,
+        )
+        if not verified_reconciliation:
+            return rollback_reconcile_result(
+                asset,
+                metadata,
+                dry_run=False,
+                reconciliation="manual_required",
+                action="none",
+                reason=verified_reason,
+                status_before=status_before,
+                status_after=status_before,
+                move_status_before=move_status_before,
+                move_status_after=move_status_before,
+            )
+        if reconciliation == "already_at_target":
+            asset.status = "ready"
+            asset.move_status = "moved"
+            asset.needs_human_review = False
+            asset.filename = asset.target_name or asset.filename
+            asset.source_path = asset.remote_path
+            asset.moved_at = asset.moved_at or datetime.now(UTC)
+            asset.review_reason = reconciled_review_reason(asset.review_reason)
+        elif reconciliation == "still_at_source":
+            asset.status = "move_planned"
+            asset.move_status = "planned"
+            asset.needs_human_review = False
+            asset.filename = asset.original_name or asset.filename
+            asset.review_reason = reconciled_review_reason(asset.review_reason)
+        status_after = asset.status
+        move_status_after = asset.move_status
+        session.commit()
+
+    return rollback_reconcile_result(
+        asset,
+        metadata,
+        dry_run=not apply,
+        reconciliation=reconciliation,
+        action=action,
+        reason=reason,
+        status_before=status_before,
+        status_after=status_after,
+        move_status_before=move_status_before,
+        move_status_after=move_status_after,
+    )
+
+
+def classify_rollback_reconciliation(
+    session: Session,
+    drive_client: DriveClient,
+    asset: Asset,
+    metadata: DriveFile,
+) -> tuple[str, str, str | None]:
+    source_parent_id = asset.original_parent_id
+    if metadata.trashed:
+        return "manual_required", "none", "file is trashed"
+    if len(metadata.parents) != 1:
+        return "manual_required", "none", f"ambiguous parents: {metadata.parents!r}"
+    current_parent_id = metadata.parents[0]
+    if source_parent_id and current_parent_id == source_parent_id:
+        return "still_at_source", "reset_planned", None
+
+    expected_target_name = asset.target_name or PurePosixPath(asset.remote_path).name
+    target_parent_id = asset.target_parent_id or resolve_reconcile_target_parent_id(session, drive_client, asset)
+    if not expected_target_name:
+        return "manual_required", "none", "target_name is missing"
+    if target_parent_id:
+        if current_parent_id == target_parent_id and metadata.name == expected_target_name:
+            return "already_at_target", "finalize_moved", None
+        if current_parent_id == target_parent_id and metadata.name != expected_target_name:
+            return "manual_required", "none", "file is in target parent with unexpected name"
+    if not source_parent_id:
+        return "manual_required", "none", "original_parent_id is missing"
+    if not target_parent_id:
+        return "manual_required", "none", "target_parent_id is missing"
+    return "manual_required", "none", "file is not in expected source or target parent"
+
+
+def resolve_reconcile_target_parent_id(
+    session: Session,
+    drive_client: DriveClient,
+    asset: Asset,
+) -> str | None:
+    if asset.target_parent_id:
+        return asset.target_parent_id
+    target_path = asset.remote_path or ""
+    target_parts = [part for part in PurePosixPath(target_path).parent.parts if part and part != "."]
+    if not target_parts:
+        return None
+    batch_number = reconcile_target_batch_number(target_parts)
+    folder = session.scalar(
+        select(ManagedDriveFolder).where(
+            ManagedDriveFolder.scope == asset.scope,
+            ManagedDriveFolder.brand_id == asset.brand_id,
+            ManagedDriveFolder.title_slug == asset.title_slug,
+            ManagedDriveFolder.title_type == asset.title_type,
+            ManagedDriveFolder.collection == asset.collection,
+            ManagedDriveFolder.media_type == asset.type,
+            ManagedDriveFolder.path_layout_version == asset.path_layout_version,
+            ManagedDriveFolder.primary_theme.is_(None),
+            ManagedDriveFolder.primary_topic == compact_folder_primary_topic(asset),
+            ManagedDriveFolder.orientation == "compact",
+            ManagedDriveFolder.batch_number == batch_number,
+        )
+    )
+    if folder is not None:
+        return folder.drive_folder_id
+    return resolve_existing_drive_folder_path(drive_client, target_parts)
+
+
+def reconcile_target_batch_number(target_parts: list[str]) -> int:
+    batch = target_parts[-1] if target_parts else ""
+    if batch.startswith("lote-"):
+        try:
+            return int(batch.removeprefix("lote-"))
+        except ValueError:
+            return 1
+    return 1
+
+
+def resolve_existing_drive_folder_path(drive_client: DriveClient, target_parts: list[str]) -> str | None:
+    roots = getattr(drive_client, "root_folder_ids", ())
+    for root_id in roots:
+        parent_id = root_id
+        for part in target_parts:
+            parent_id = drive_client.find_child_folder_id(parent_id, part) or ""
+            if not parent_id:
+                break
+        if parent_id:
+            return parent_id
+    return None
+
+
+def verify_reconciliation_location(
+    session: Session,
+    drive_client: DriveClient,
+    asset: Asset,
+    reconciliation: str,
+) -> tuple[bool, str | None]:
+    file_id = asset.drive_file_id or ""
+    if reconciliation == "already_at_target":
+        expected_name = asset.target_name or PurePosixPath(asset.remote_path).name
+        expected_parent = asset.target_parent_id or resolve_reconcile_target_parent_id(session, drive_client, asset) or ""
+        if not expected_name or not expected_parent:
+            return False, "missing verification name or parent"
+        if drive_client.verify_file_location(file_id, expected_name, expected_parent):
+            return True, None
+        return False, "verification failed"
+    elif reconciliation == "still_at_source":
+        expected_parent = asset.original_parent_id or ""
+        if not expected_parent:
+            return False, "missing verification parent"
+        metadata = drive_client.get_file_metadata(file_id)
+        if metadata.id == file_id and not metadata.trashed and metadata.parents == [expected_parent]:
+            return True, None
+        return False, "verification failed"
+    else:
+        return False, "unsupported reconciliation"
+
+
+def rollback_reconcile_result(
+    asset: Asset,
+    metadata: DriveFile | None = None,
+    *,
+    dry_run: bool,
+    reconciliation: str,
+    action: str,
+    reason: str | None,
+    status_before: str | None,
+    status_after: str | None,
+    move_status_before: str | None,
+    move_status_after: str | None,
+) -> RollbackReconcileResult:
+    parents = metadata.parents if metadata is not None else []
+    return RollbackReconcileResult(
+        dry_run=dry_run,
+        drive_file_id=asset.drive_file_id or "",
+        current_name=metadata.name if metadata is not None else None,
+        current_parent_id=parents[0] if len(parents) == 1 else None,
+        expected_source_parent_id=asset.original_parent_id,
+        expected_target_path=asset.remote_path,
+        expected_target_parent_id=asset.target_parent_id,
+        expected_target_name=asset.target_name or PurePosixPath(asset.remote_path).name,
+        reconciliation=reconciliation,
+        action=action,
+        reason=reason,
+        status_before=status_before,
+        status_after=status_after,
+        move_status_before=move_status_before,
+        move_status_after=move_status_after,
+        drive_file_id_after=asset.drive_file_id,
+    )
+
+
+def reconciled_review_reason(review_reason: str | None) -> str | None:
+    if not review_reason:
+        return None
+    incident_markers = (
+        "move_error",
+        "rollback",
+        "drive_auth",
+        "invalid_grant",
+        "verification_error",
+        "verification failed",
+    )
+    if any(marker in review_reason.lower() for marker in incident_markers):
+        return None
+    return review_reason
 
 
 def record_human_review_override(session: Session, asset: Asset, approval: ReviewApproval) -> None:

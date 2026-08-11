@@ -33,6 +33,7 @@ from app.services.managed_drive_pilot import (
     mutation_client_for_apply,
     preflight_drive_access,
     rename_reviewed_moved_asset,
+    reconcile_rollback_required_assets,
     release_batch_lock,
     replan_reviewed_assets,
     run_drive_batch,
@@ -114,6 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--tags", help="Comma-separated tags.")
     approve.add_argument("--reviewed-by")
     approve.add_argument("--yes", action="store_true", help="Confirm plan update without prompting.")
+    reconcile = review_subparsers.add_parser(
+        "reconcile",
+        parents=[common],
+        description="Repair review_required/rollback_required assets after transient Drive or OAuth failures.",
+    )
+    reconcile.add_argument("--apply", action="store_true")
+    reconcile.add_argument("--limit", type=int, default=500)
 
     layout = drive_subparsers.add_parser("layout", parents=[common])
     layout_subparsers = layout.add_subparsers(dest="layout_action", required=True)
@@ -294,6 +302,17 @@ def handle_review(args: argparse.Namespace, session: Session) -> int:
         )
         output(args, row.to_dict(), row_lines([row.to_dict()]))
         return EXIT_SUCCESS
+    if args.review_action == "reconcile":
+        drive_client = drive_client_from_environment()
+        results = reconcile_rollback_required_assets(
+            session,
+            drive_client,
+            apply=args.apply,
+            limit=args.limit,
+        )
+        data = reconcile_payload(results, apply=args.apply)
+        output(args, data, reconcile_lines(data))
+        return EXIT_OPERATIONAL_FAILURE if data["summary"]["FILES_FAILED"] else EXIT_SUCCESS
     return EXIT_INVALID_CONFIG
 
 
@@ -416,7 +435,11 @@ def mutating_command(args: argparse.Namespace) -> bool:
     if args.action in {"replan-reviewed", "rename-reviewed"}:
         return bool(getattr(args, "apply", False))
     if args.action == "review":
-        return getattr(args, "review_action", "") == "approve"
+        if getattr(args, "review_action", "") == "approve":
+            return True
+        if getattr(args, "review_action", "") == "reconcile":
+            return bool(getattr(args, "apply", False))
+        return False
     if args.action == "layout":
         return bool(getattr(args, "apply", False))
     if args.action == "ingest":
@@ -679,6 +702,44 @@ def rename_lines(data: dict[str, Any]) -> list[str]:
         f"TARGET_PATH_BEFORE={data['target_path_before'] or ''}",
         f"TARGET_PATH_AFTER={data['target_path_after'] or ''}",
     ]
+
+
+def reconcile_payload(results: list[Any], *, apply: bool) -> dict[str, Any]:
+    rows = [result.to_dict() for result in results]
+    db_mutations = sum(1 for row in rows if row["status_before"] != row["status_after"] or row["move_status_before"] != row["move_status_after"])
+    summary = {
+        "ROLLBACK_REQUIRED_MATCHED": len(rows),
+        "ALREADY_AT_TARGET": sum(1 for row in rows if row["reconciliation"] == "already_at_target"),
+        "STILL_AT_SOURCE": sum(1 for row in rows if row["reconciliation"] == "still_at_source"),
+        "MANUAL_REQUIRED": sum(1 for row in rows if row["reconciliation"] == "manual_required"),
+        "DB_MUTATIONS": db_mutations if apply else 0,
+        "DRIVE_MUTATIONS": 0,
+        "FILES_FAILED": sum(1 for row in rows if str(row.get("reason") or "").startswith("drive_metadata_error")),
+    }
+    return {"dry_run": not apply, "summary": summary, "assets": rows}
+
+
+def reconcile_lines(data: dict[str, Any]) -> list[str]:
+    summary = data["summary"]
+    lines = [f"DRY_RUN={'YES' if data['dry_run'] else 'NO'}"]
+    lines.extend(f"{key}={value}" for key, value in summary.items())
+    for row in data["assets"]:
+        lines.append(
+            "\t".join(
+                str(row.get(key) or "")
+                for key in (
+                    "drive_file_id",
+                    "current_name",
+                    "current_parent_id",
+                    "expected_source_parent_id",
+                    "expected_target_path",
+                    "reconciliation",
+                    "action",
+                    "reason",
+                )
+            )
+        )
+    return lines
 
 
 def mutation_client_for_repair():
