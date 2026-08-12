@@ -427,6 +427,7 @@ def allowed_brand_exists(brand: Brand):
 def serialize_money_printer_asset(asset: Asset) -> dict[str, Any]:
     return {
         "asset_id": asset.asset_uid,
+        "asset_uid": asset.asset_uid,
         "drive_file_id": asset.drive_file_id,
         "scope": asset.scope,
         "brand": asset.brand.slug if asset.scope == "brand" and asset.brand else None,

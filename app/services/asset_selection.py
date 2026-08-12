@@ -27,7 +27,7 @@ LOOP_HINTS = ("background", "fondo", "loop", "loopable", "ambiente", "ambiental"
 @dataclass(frozen=True)
 class ScoredSelectionCandidate:
     asset: Asset
-    score: float
+    score: float | None
     match_reasons: list[str]
 
 

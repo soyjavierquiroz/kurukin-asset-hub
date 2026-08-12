@@ -14,10 +14,18 @@ from app.schemas.job_asset_bundle import (
     SceneAssetRequest,
     SelectedBundleAsset,
 )
-from app.services.asset_selection import select_assets
+from app.services.asset_selection import (
+    ScoredSelectionCandidate,
+    select_assets,
+    serialize_selected_asset,
+)
 
 
 class JobAssetBundleValidationError(ValueError):
+    pass
+
+
+class ExplicitAssetSelectionValidationError(ValueError):
     pass
 
 
@@ -25,12 +33,14 @@ def create_job_asset_bundle(
     session: Session,
     request: CreateJobAssetBundleRequest,
 ) -> JobAssetBundle:
-    brand = session.scalar(select(Brand).where(Brand.slug == request.brand_slug))
-    if brand is None:
-        raise JobAssetBundleValidationError(f"Brand not found: {request.brand_slug}")
+    brand: Brand | None = None
+    if request.brand_slug is not None:
+        brand = session.scalar(select(Brand).where(Brand.slug == request.brand_slug))
+        if brand is None:
+            raise JobAssetBundleValidationError(f"Brand not found: {request.brand_slug}")
 
     product: Product | None = None
-    if request.product_slug:
+    if request.product_slug and brand is not None:
         product = session.scalar(
             select(Product).where(
                 Product.brand_id == brand.id,
@@ -61,17 +71,28 @@ def create_job_asset_bundle(
     item_payloads: list[dict[str, object]] = []
 
     for scene in request.scenes:
-        selection_request = build_scene_selection_request(
-            request=request,
-            scene=scene,
-            exclude_asset_ids=selected_asset_ids,
-            exclude_asset_uids=selected_asset_uids,
-        )
-        selection = select_assets(session, selection_request)
-        asset_rows = load_assets_by_id(session, [asset.id for asset in selection.assets])
+        if scene.selected_asset_uids:
+            selection_assets = resolve_explicit_scene_assets(session, scene)
+            asset_rows = {asset.id: asset for asset in selection_assets}
+            selected_assets = [
+                serialize_explicit_selected_asset(asset)
+                for asset in selection_assets
+            ]
+            requested_count = len(scene.selected_asset_uids)
+        else:
+            selection_request = build_scene_selection_request(
+                request=request,
+                scene=scene,
+                exclude_asset_ids=selected_asset_ids,
+                exclude_asset_uids=selected_asset_uids,
+            )
+            selection = select_assets(session, selection_request)
+            selected_assets = selection.assets
+            asset_rows = load_assets_by_id(session, [asset.id for asset in selected_assets])
+            requested_count = scene.count
         scene_assets: list[dict[str, object]] = []
 
-        for rank, selected_asset in enumerate(selection.assets, start=1):
+        for rank, selected_asset in enumerate(selected_assets, start=1):
             selected_asset_ids.add(selected_asset.id)
             selected_asset_uids.add(selected_asset.asset_uid)
             asset_row = asset_rows.get(selected_asset.id)
@@ -104,7 +125,7 @@ def create_job_asset_bundle(
                 "scene_id": scene.scene_id,
                 "scene_index": scene.scene_index,
                 "script_scene": scene.script_scene,
-                "requested_count": scene.count,
+                "requested_count": requested_count,
                 "selected_count": len(scene_assets),
                 "assets": scene_assets,
             }
@@ -226,7 +247,7 @@ def serialize_job_asset_bundle_response(bundle: JobAssetBundle) -> JobAssetBundl
     brand_slug = (
         bundle.brand.slug
         if bundle.brand
-        else str(bundle.manifest_json.get("brand_slug", ""))
+        else bundle.manifest_json.get("brand_slug")
     )
     return JobAssetBundleResponse(
         bundle_uid=bundle.bundle_uid,
@@ -301,6 +322,65 @@ def load_assets_by_id(session: Session, asset_ids: list[int]) -> dict[int, Asset
         return {}
     assets = session.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()
     return {asset.id: asset for asset in assets}
+
+
+def resolve_explicit_scene_assets(session: Session, scene: SceneAssetRequest) -> list[Asset]:
+    assets_by_uid = load_assets_by_uid(session, scene.selected_asset_uids)
+    resolved_assets: list[Asset] = []
+    for asset_uid in scene.selected_asset_uids:
+        asset = assets_by_uid.get(asset_uid)
+        if asset is None:
+            raise ExplicitAssetSelectionValidationError(
+                f"selected_asset_uid rejected: {asset_uid} (not_found)"
+            )
+        rejection_reason = explicit_asset_rejection_reason(asset)
+        if rejection_reason is not None:
+            raise ExplicitAssetSelectionValidationError(
+                f"selected_asset_uid rejected: {asset_uid} ({rejection_reason})"
+            )
+        resolved_assets.append(asset)
+    return resolved_assets
+
+
+def load_assets_by_uid(session: Session, asset_uids: list[str]) -> dict[str, Asset]:
+    if not asset_uids:
+        return {}
+    assets = session.scalars(
+        select(Asset)
+        .where(Asset.asset_uid.in_(asset_uids))
+        .options(
+            selectinload(Asset.source),
+            selectinload(Asset.brand),
+            selectinload(Asset.product),
+        )
+    ).all()
+    return {asset.asset_uid: asset for asset in assets}
+
+
+def explicit_asset_rejection_reason(asset: Asset) -> str | None:
+    if asset.status not in {"ready", "moved"}:
+        return "status_not_eligible"
+    if asset.move_status != "moved":
+        return "move_status_not_moved"
+    if asset.source_status in {"missing", "inaccessible", "deleted"}:
+        return "source_status_not_eligible"
+    if asset.usage_scope == "restricted":
+        return "usage_scope_restricted"
+    if asset.rights_status == "restricted":
+        return "rights_status_restricted"
+    if not asset.auto_select_enabled:
+        return "auto_select_disabled"
+    return None
+
+
+def serialize_explicit_selected_asset(asset: Asset) -> SelectedAsset:
+    return serialize_selected_asset(
+        ScoredSelectionCandidate(
+            asset=asset,
+            score=None,
+            match_reasons=["explicit_selection"],
+        )
+    )
 
 
 def serialize_manifest_asset(

@@ -2,7 +2,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import JobAssetBundle, JobAssetBundleItem
+from app.models import Asset, Brand, JobAssetBundle, JobAssetBundleItem, Product, Source
+from app.schemas.asset_selection import AssetSelectionResponse
+from app.services import job_asset_bundles
 from tests.test_asset_search_api import API_HEADERS, make_test_client
 from tests.test_asset_selection_api import seed_selection_assets
 
@@ -11,6 +13,114 @@ def seed_client() -> tuple[TestClient, sessionmaker[Session]]:
     client, session_factory = make_test_client()
     with session_factory() as session:
         seed_selection_assets(session)
+    return client, session_factory
+
+
+def seed_mpt_explicit_assets(session: Session) -> dict[str, Asset | Brand | Product]:
+    brand = Brand(slug="grandiosa-mujer", name="Grandiosa Mujer")
+    product = Product(brand=brand, slug="veyra", name="Veyra")
+    source = Source(
+        source_id="drive-grandiosa-mpt",
+        provider="google_drive",
+        label="Grandiosa MPT Drive",
+        rclone_remote="gdrive_grandiosa",
+    )
+    session.add_all([brand, product, source])
+    session.flush()
+
+    asset_a = make_mpt_explicit_asset(
+        source=source,
+        uid="drive-A",
+        filename="drive_a.mp4",
+        brand=brand,
+        product=product,
+        scope="brand",
+    )
+    asset_b = make_mpt_explicit_asset(
+        source=source,
+        uid="drive-B",
+        filename="drive_b.mp4",
+        brand=brand,
+        product=product,
+        scope="brand",
+    )
+    generic = make_mpt_explicit_asset(
+        source=source,
+        uid="drive-generic",
+        filename="generic.mp4",
+        brand=None,
+        product=None,
+        scope="generic",
+    )
+    title = make_mpt_explicit_asset(
+        source=source,
+        uid="drive-title",
+        filename="title.mp4",
+        brand=None,
+        product=None,
+        scope="title",
+    )
+    title.title_name = "Mi Otra Yo"
+    title.title_slug = "mi-otra-yo"
+    title.title_type = "series"
+    restricted = make_mpt_explicit_asset(
+        source=source,
+        uid="drive-restricted",
+        filename="restricted.mp4",
+        brand=brand,
+        product=product,
+        scope="brand",
+    )
+    restricted.usage_scope = "restricted"
+    session.add_all([asset_a, asset_b, generic, title, restricted])
+    session.commit()
+    return {
+        "brand": brand,
+        "product": product,
+        "asset_a": asset_a,
+        "asset_b": asset_b,
+        "generic": generic,
+        "title": title,
+    }
+
+
+def make_mpt_explicit_asset(
+    *,
+    source: Source,
+    uid: str,
+    filename: str,
+    brand: Brand | None,
+    product: Product | None,
+    scope: str,
+) -> Asset:
+    return Asset(
+        asset_uid=uid,
+        source=source,
+        provider="google_drive",
+        rclone_remote="gdrive_grandiosa",
+        remote_path=f"Grandiosa Mujer/Veyra/{filename}",
+        filename=filename,
+        type="video",
+        scope=scope,
+        brand=brand,
+        product=product,
+        status="ready",
+        move_status="moved",
+        source_status="active",
+        usage_scope="brand_exclusive",
+        rights_status="owned",
+        auto_select_enabled=True,
+        preview_status="ready",
+        ai_enrichment_status="ready",
+        orientation="9:16",
+        quality_score=1.0,
+    )
+
+
+def seed_mpt_client() -> tuple[TestClient, sessionmaker[Session]]:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_mpt_explicit_assets(session)
     return client, session_factory
 
 
@@ -29,6 +139,31 @@ def bundle_payload(**overrides: object) -> dict[str, object]:
                 "count": 1,
                 "require_preview_ready": True,
             }
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def mpt_bundle_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "job_id": "mpt-001",
+        "brand_slug": "grandiosa-mujer",
+        "product_slug": "veyra",
+        "created_by": "money-printer-turbo",
+        "scenes": [
+            {
+                "scene_id": "scene-001",
+                "scene_index": 1,
+                "script_scene": "Escena uno",
+                "selected_asset_uids": ["drive-A"],
+            },
+            {
+                "scene_id": "scene-002",
+                "scene_index": 2,
+                "script_scene": "Escena dos",
+                "selected_asset_uids": ["drive-B"],
+            },
         ],
     }
     payload.update(overrides)
@@ -79,6 +214,305 @@ def test_create_bundle_with_one_scene_and_asset() -> None:
         )
         assert bundle is not None
         assert bundle.job_id == "job-bundle-001"
+
+
+def test_explicit_bundle_creates_exact_selected_assets() -> None:
+    client, session_factory = seed_mpt_client()
+
+    response = post_bundle(client, mpt_bundle_payload())
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["brand_slug"] == "grandiosa-mujer"
+    assert [(asset["scene_id"], asset["asset_uid"]) for asset in data["assets"]] == [
+        ("scene-001", "drive-A"),
+        ("scene-002", "drive-B"),
+    ]
+    with session_factory() as session:
+        items = session.scalars(
+            select(JobAssetBundleItem)
+            .join(JobAssetBundle)
+            .where(JobAssetBundle.bundle_uid == data["bundle_uid"])
+            .order_by(JobAssetBundleItem.scene_index, JobAssetBundleItem.rank)
+        ).all()
+        assert [item.asset_uid for item in items] == ["drive-A", "drive-B"]
+        assert all(item.asset_id is not None for item in items)
+
+
+def test_explicit_only_generic_without_brand_slug_is_valid() -> None:
+    client, _ = seed_mpt_client()
+    payload = mpt_bundle_payload(
+        job_id="mpt-generic-no-brand",
+        scenes=[
+            {
+                "scene_id": "scene-001",
+                "script_scene": "Escena generic",
+                "selected_asset_uids": ["drive-generic"],
+            }
+        ],
+    )
+    del payload["brand_slug"]
+    del payload["product_slug"]
+
+    response = post_bundle(client, payload)
+
+    assert response.status_code == 200
+    assert response.json()["brand_slug"] is None
+    assert response.json()["assets"][0]["asset_uid"] == "drive-generic"
+
+
+def test_explicit_only_title_without_brand_slug_is_valid() -> None:
+    client, _ = seed_mpt_client()
+    payload = mpt_bundle_payload(
+        job_id="mpt-title-no-brand",
+        scenes=[
+            {
+                "scene_id": "scene-001",
+                "script_scene": "Escena title",
+                "selected_asset_uids": ["drive-title"],
+            }
+        ],
+    )
+    del payload["brand_slug"]
+    del payload["product_slug"]
+
+    response = post_bundle(client, payload)
+
+    assert response.status_code == 200
+    assert response.json()["brand_slug"] is None
+    assert response.json()["assets"][0]["asset_uid"] == "drive-title"
+
+
+def test_explicit_only_brand_asset_without_brand_slug_is_valid() -> None:
+    client, _ = seed_mpt_client()
+    payload = mpt_bundle_payload(job_id="mpt-brand-asset-no-brand")
+    del payload["brand_slug"]
+    del payload["product_slug"]
+
+    response = post_bundle(client, payload)
+
+    assert response.status_code == 200
+    assert response.json()["brand_slug"] is None
+    assert [asset["asset_uid"] for asset in response.json()["assets"]] == ["drive-A", "drive-B"]
+
+
+def test_auto_selection_without_brand_slug_returns_422() -> None:
+    client, _ = seed_client()
+    payload = bundle_payload(job_id="job-auto-no-brand")
+    del payload["brand_slug"]
+    del payload["product_slug"]
+
+    response = post_bundle(client, payload)
+
+    assert response.status_code == 422
+    assert "brand_slug is required" in str(response.json()["detail"])
+
+
+def test_mixed_explicit_and_auto_without_brand_slug_returns_422() -> None:
+    client, _ = seed_mpt_client()
+    payload = mpt_bundle_payload(
+        job_id="mpt-mixed-no-brand",
+        scenes=[
+            {
+                "scene_id": "scene-001",
+                "script_scene": "Escena explicit",
+                "selected_asset_uids": ["drive-A"],
+            },
+            {
+                "scene_id": "scene-002",
+                "script_scene": "Escena auto",
+            },
+        ],
+    )
+    del payload["brand_slug"]
+    del payload["product_slug"]
+
+    response = post_bundle(client, payload)
+
+    assert response.status_code == 422
+    assert "brand_slug is required" in str(response.json()["detail"])
+
+
+def test_explicit_selection_does_not_call_auto_selection(monkeypatch) -> None:
+    client, _ = seed_mpt_client()
+
+    def fail_select_assets(*_args, **_kwargs) -> AssetSelectionResponse:
+        raise AssertionError("auto-selection should not run for explicit scenes")
+
+    monkeypatch.setattr(job_asset_bundles, "select_assets", fail_select_assets)
+
+    response = post_bundle(client, mpt_bundle_payload(job_id="mpt-no-auto"))
+
+    assert response.status_code == 200
+    assert [asset["asset_uid"] for asset in response.json()["assets"]] == ["drive-A", "drive-B"]
+
+
+def test_explicit_selected_asset_order_preserves_rank() -> None:
+    client, session_factory = seed_mpt_client()
+    payload = mpt_bundle_payload(
+        job_id="mpt-rank",
+        scenes=[
+            {
+                "scene_id": "scene-001",
+                "scene_index": 1,
+                "script_scene": "Escena uno",
+                "selected_asset_uids": ["drive-B", "drive-A"],
+            }
+        ],
+    )
+
+    response = post_bundle(client, payload)
+
+    assert response.status_code == 200
+    assert [(asset["asset_uid"], asset["rank"]) for asset in response.json()["assets"]] == [
+        ("drive-B", 1),
+        ("drive-A", 2),
+    ]
+    with session_factory() as session:
+        items = session.scalars(
+            select(JobAssetBundleItem)
+            .join(JobAssetBundle)
+            .where(JobAssetBundle.bundle_uid == response.json()["bundle_uid"])
+            .order_by(JobAssetBundleItem.rank)
+        ).all()
+        assert [(item.asset_uid, item.rank) for item in items] == [("drive-B", 1), ("drive-A", 2)]
+        assert [item.score for item in items] == [None, None]
+        assert [item.match_reasons for item in items] == [
+            ["explicit_selection"],
+            ["explicit_selection"],
+        ]
+
+
+def test_explicit_missing_asset_uid_returns_422() -> None:
+    client, _ = seed_mpt_client()
+
+    response = post_bundle(
+        client,
+        mpt_bundle_payload(
+            job_id="mpt-missing",
+            scenes=[
+                {
+                    "scene_id": "scene-001",
+                    "script_scene": "Escena uno",
+                    "selected_asset_uids": ["drive-missing"],
+                }
+            ],
+        ),
+    )
+
+    assert response.status_code == 422
+    assert "drive-missing" in response.json()["detail"]
+
+
+def test_explicit_restricted_asset_returns_422() -> None:
+    client, _ = seed_mpt_client()
+
+    response = post_bundle(
+        client,
+        mpt_bundle_payload(
+            job_id="mpt-restricted",
+            scenes=[
+                {
+                    "scene_id": "scene-001",
+                    "script_scene": "Escena uno",
+                    "selected_asset_uids": ["drive-restricted"],
+                }
+            ],
+        ),
+    )
+
+    assert response.status_code == 422
+    assert "drive-restricted" in response.json()["detail"]
+
+
+def test_explicit_selected_and_excluded_same_uid_returns_422() -> None:
+    client, _ = seed_mpt_client()
+
+    response = post_bundle(
+        client,
+        mpt_bundle_payload(
+            job_id="mpt-exclude-conflict",
+            scenes=[
+                {
+                    "scene_id": "scene-001",
+                    "script_scene": "Escena uno",
+                    "selected_asset_uids": ["drive-A"],
+                    "exclude_asset_uids": ["drive-A"],
+                }
+            ],
+        ),
+    )
+
+    assert response.status_code == 422
+    assert "drive-A" in str(response.json()["detail"])
+
+
+def test_explicit_duplicate_within_scene_returns_422() -> None:
+    client, _ = seed_mpt_client()
+
+    response = post_bundle(
+        client,
+        mpt_bundle_payload(
+            job_id="mpt-duplicate",
+            scenes=[
+                {
+                    "scene_id": "scene-001",
+                    "script_scene": "Escena uno",
+                    "selected_asset_uids": ["drive-A", "drive-A"],
+                }
+            ],
+        ),
+    )
+
+    assert response.status_code == 422
+    assert "duplicate" in str(response.json()["detail"])
+
+
+def test_explicit_same_uid_across_scenes_is_allowed() -> None:
+    client, _ = seed_mpt_client()
+
+    response = post_bundle(
+        client,
+        mpt_bundle_payload(
+            job_id="mpt-reuse",
+            scenes=[
+                {
+                    "scene_id": "scene-001",
+                    "scene_index": 1,
+                    "script_scene": "Escena uno",
+                    "selected_asset_uids": ["drive-A"],
+                },
+                {
+                    "scene_id": "scene-002",
+                    "scene_index": 2,
+                    "script_scene": "Escena dos",
+                    "selected_asset_uids": ["drive-A"],
+                },
+            ],
+        ),
+    )
+
+    assert response.status_code == 200
+    assert [asset["asset_uid"] for asset in response.json()["assets"]] == ["drive-A", "drive-A"]
+
+
+def test_legacy_bundle_without_explicit_selection_uses_auto_selection(monkeypatch) -> None:
+    client, _ = seed_client()
+    original_select_assets = job_asset_bundles.select_assets
+    calls = 0
+
+    def spy_select_assets(*args, **kwargs) -> AssetSelectionResponse:
+        nonlocal calls
+        calls += 1
+        return original_select_assets(*args, **kwargs)
+
+    monkeypatch.setattr(job_asset_bundles, "select_assets", spy_select_assets)
+
+    response = post_bundle(client, bundle_payload(job_id="job-legacy-auto"))
+
+    assert response.status_code == 200
+    assert calls == 1
+    assert response.json()["assets"][0]["asset_uid"] == "asset-mystic"
 
 
 def test_create_bundle_with_multiple_scenes() -> None:

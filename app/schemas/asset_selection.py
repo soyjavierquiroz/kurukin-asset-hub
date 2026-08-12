@@ -79,7 +79,7 @@ class SelectedAsset(BaseModel):
     best_for: str | None
     avoid_for: str | None
     search_text: str | None
-    score: float
+    score: float | None
     match_reasons: list[str]
     thumbnail_url: str | None
     preview_url: str | None

@@ -14,9 +14,12 @@ from app.services.job_bundle_materialization import (
     safe_materialized_filename,
     sanitize_materialization_error,
 )
+from app.services.job_asset_bundles import create_job_asset_bundle
+from app.schemas.job_asset_bundle import CreateJobAssetBundleRequest
 from app.services.rclone_service import RcloneError
 from scripts import materialize_job_bundle as materialize_cli
 from tests.test_asset_search_api import API_HEADERS, make_test_client
+from tests.test_job_asset_bundles_api import mpt_bundle_payload, seed_mpt_explicit_assets
 from tests.test_asset_selection_api import seed_selection_assets
 
 
@@ -327,6 +330,41 @@ def test_renderer_manifest_json_is_saved(monkeypatch, tmp_path: Path) -> None:
     assert saved.renderer_manifest_json["bundle_uid"] == bundle.bundle_uid
     manifest_file = tmp_path / bundle.bundle_uid / "manifests" / "renderer-manifest.json"
     assert manifest_file.exists()
+
+
+def test_explicit_bundle_materialization_and_renderer_manifest_keep_asset_uid(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    configure_storage(monkeypatch, tmp_path)
+    _, session_factory = make_test_client()
+    fake = FakeRclone()
+
+    with session_factory() as session:
+        seed_mpt_explicit_assets(session)
+        request = CreateJobAssetBundleRequest.model_validate(
+            mpt_bundle_payload(job_id="mpt-materialize")
+        )
+        bundle = create_job_asset_bundle(session, request)
+        result = materialize_job_asset_bundle(
+            session,
+            bundle.bundle_uid,
+            rclone_service=fake,
+            require_rclone_config=False,
+        )
+        session.commit()
+
+    manifest_assets = [
+        asset
+        for scene in result["renderer_manifest"]["scenes"]
+        for asset in scene["assets"]
+    ]
+    assert result["materialization_status"] == "ready"
+    assert [asset["asset_uid"] for asset in manifest_assets] == ["drive-A", "drive-B"]
+    assert all(asset["local_path"] for asset in manifest_assets)
+    assert all(asset["relative_path"] for asset in manifest_assets)
+    assert all(asset["size_bytes"] for asset in manifest_assets)
+    assert all(asset["sha256"] for asset in manifest_assets)
 
 
 def test_safe_filename_avoids_path_traversal() -> None:

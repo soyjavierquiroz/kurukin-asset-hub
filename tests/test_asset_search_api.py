@@ -853,6 +853,8 @@ def test_money_printer_default_returns_only_generic() -> None:
     result = post_money_printer_search(client, {"query": "mujer telefono", "limit": 20})
 
     assert money_printer_asset_ids(result) == {"generic-ready", "moved-status-generic"}
+    for asset in result["assets"]:
+        assert asset["asset_id"] == asset["asset_uid"]
     assert result["source_policy"] == {"sources": [{"scope": "generic", "brand": None, "title": None}]}
 
 

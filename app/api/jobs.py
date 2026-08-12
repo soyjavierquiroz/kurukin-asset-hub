@@ -11,6 +11,7 @@ from app.schemas.job_bundle_materialization import (
     MaterializeBundleRequest,
 )
 from app.services.job_asset_bundles import (
+    ExplicitAssetSelectionValidationError,
     JobAssetBundleValidationError,
     create_job_asset_bundle,
     get_job_asset_bundle_by_uid,
@@ -42,6 +43,12 @@ def api_create_job_asset_bundle(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ExplicitAssetSelectionValidationError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
     except Exception:
