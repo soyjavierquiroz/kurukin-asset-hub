@@ -11,6 +11,7 @@ from app.models import Asset, Brand, JobAssetBundle, JobAssetBundleItem, Product
 from app.services.job_bundle_materialization import (
     JobBundleMaterializationConfigError,
     materialize_job_asset_bundle,
+    resolve_rclone_source_path,
     safe_materialized_filename,
     sanitize_materialization_error,
 )
@@ -237,6 +238,56 @@ def test_duplicate_asset_is_copied_once_and_reuses_relative_path(
 
     assert len(fake.calls) == 1
     assert relative_paths[0] == relative_paths[1]
+
+
+def test_resolve_rclone_source_path_prefixes_relative_path() -> None:
+    assert (
+        resolve_rclone_source_path(
+            "10_genericos/video/foo.mp4",
+            "Javier/KURUKIN_ASSET_HUB_PILOT",
+        )
+        == "Javier/KURUKIN_ASSET_HUB_PILOT/10_genericos/video/foo.mp4"
+    )
+
+
+def test_resolve_rclone_source_path_does_not_duplicate_root() -> None:
+    assert (
+        resolve_rclone_source_path(
+            "Javier/KURUKIN_ASSET_HUB_PILOT/10_genericos/video/foo.mp4",
+            "Javier/KURUKIN_ASSET_HUB_PILOT",
+        )
+        == "Javier/KURUKIN_ASSET_HUB_PILOT/10_genericos/video/foo.mp4"
+    )
+
+
+def test_resolve_rclone_source_path_keeps_path_when_root_empty() -> None:
+    assert resolve_rclone_source_path("10_genericos/video/foo.mp4", "") == "10_genericos/video/foo.mp4"
+
+
+def test_materialize_uses_source_root_path_for_rclone_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    configure_storage(monkeypatch, tmp_path)
+    _, session_factory = seed_client()
+    fake = FakeRclone()
+
+    with session_factory() as session:
+        bundle = create_materialization_bundle(session)
+        item = bundle.items[0]
+        item.asset.source.root_path = "Javier/KURUKIN_ASSET_HUB_PILOT"
+        item.asset.remote_path = "10_genericos/video/foo.mp4"
+        item.asset.filename = "foo.mp4"
+        item.selection_json["remote_path"] = "10_genericos/video/foo.mp4"
+        item.selection_json["filename"] = "foo.mp4"
+        materialize_job_asset_bundle(
+            session,
+            bundle.bundle_uid,
+            rclone_service=fake,
+            require_rclone_config=False,
+        )
+
+    assert fake.calls[0][1] == "Javier/KURUKIN_ASSET_HUB_PILOT/10_genericos/video/foo.mp4"
 
 
 def test_one_asset_failure_marks_bundle_partial(monkeypatch, tmp_path: Path) -> None:

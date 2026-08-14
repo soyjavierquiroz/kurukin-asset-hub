@@ -199,6 +199,10 @@ def materialize_bundle_item(
         raise JobBundleMaterializationValidationError("Asset has no remote path")
     if not filename or not isinstance(filename, str):
         filename = Path(remote_path).name
+    source_path = resolve_rclone_source_path(
+        remote_path,
+        asset.source.root_path if asset and asset.source else None,
+    )
 
     dedupe_key = str(item.asset_id or item.asset_uid or f"{remote}:{remote_path}")
     if dedupe_key in copied_assets:
@@ -213,7 +217,7 @@ def materialize_bundle_item(
     relative_path = local_path.relative_to(bundle_dir).as_posix()
 
     try:
-        rclone_service.copyto(remote, remote_path, str(local_path), timeout=900)
+        rclone_service.copyto(remote, source_path, str(local_path), timeout=900)
     except RcloneError as exc:
         raise JobBundleMaterializationValidationError(str(exc)) from exc
 
@@ -236,6 +240,16 @@ def compute_sha256(path: Path | str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def resolve_rclone_source_path(remote_path: str, root_path: str | None) -> str:
+    clean_remote_path = remote_path.strip().strip("/")
+    clean_root_path = (root_path or "").strip().strip("/")
+    if not clean_root_path:
+        return clean_remote_path
+    if clean_remote_path == clean_root_path or clean_remote_path.startswith(f"{clean_root_path}/"):
+        return clean_remote_path
+    return f"{clean_root_path}/{clean_remote_path}"
 
 
 def load_bundle(session: Session, bundle_uid: str) -> JobAssetBundle | None:
