@@ -6,7 +6,7 @@ import mimetypes
 import secrets
 import shutil
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
@@ -159,6 +159,72 @@ def latest_visual_intelligence_analysis(asset: Asset) -> dict[str, object]:
 
 def latest_legacy_ai_enrichment(asset: Asset) -> dict[str, object]:
     return latest_analysis_result(asset, visual=False)
+
+
+def compact_point(value: object) -> str | None:
+    if not isinstance(value, list | tuple) or len(value) < 2:
+        return None
+    try:
+        x = float(value[0])
+        y = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    return f"({x:.2f}, {y:.2f})"
+
+
+def subject_trajectory_summary(value: object) -> str:
+    if not isinstance(value, list) or not value:
+        return "-"
+    centers = [
+        center
+        for item in value
+        if isinstance(item, dict) and (center := compact_point(item.get("center"))) is not None
+    ]
+    if not centers:
+        return f"{len(value)} samples"
+    return f"{len(value)} samples · {centers[0]} -> {centers[-1]}"
+
+
+def visual_transform_view(transform: object, extra_fields: tuple[str, ...] = ()) -> dict[str, Any]:
+    if not isinstance(transform, dict):
+        return {
+            "status": "UNKNOWN",
+            "confidence": None,
+            "reasons": [],
+            "blockers": [],
+            "extras": {},
+        }
+    extras = {
+        field: transform.get(field)
+        for field in extra_fields
+        if transform.get(field) not in (None, "", [])
+    }
+    return {
+        "status": str(transform.get("status") or "unknown").upper(),
+        "confidence": transform.get("confidence"),
+        "reasons": transform.get("reasons") or [],
+        "blockers": transform.get("blockers") or [],
+        "extras": extras,
+    }
+
+
+def visual_intelligence_view_model(result: dict[str, object]) -> dict[str, Any]:
+    visual = result.get("visual") if isinstance(result, dict) else {}
+    visual = visual if isinstance(visual, dict) else {}
+    composition = visual.get("composition")
+    composition = composition if isinstance(composition, dict) else {}
+    transforms = result.get("normalized_transforms") if isinstance(result, dict) else {}
+    transforms = transforms if isinstance(transforms, dict) else {}
+    return {
+        "subject_trajectory_summary": subject_trajectory_summary(composition.get("subject_trajectory")),
+        "transforms": {
+            "flip_horizontal": visual_transform_view(transforms.get("flip_horizontal")),
+            "zoom": visual_transform_view(transforms.get("zoom"), ("max_safe_zoom",)),
+            "pan": visual_transform_view(transforms.get("pan"), ("safe_directions", "max_offset_x", "max_offset_y")),
+            "crop_vertical": visual_transform_view(transforms.get("crop_vertical"), ("safe_rect",)),
+            "crop_horizontal": visual_transform_view(transforms.get("crop_horizontal"), ("safe_rect",)),
+        },
+    }
 
 
 def latest_ai_results(assets: list[Asset]) -> dict[int, dict[str, object]]:
@@ -735,6 +801,7 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
         key=lambda item: (item.category, -item.weight, item.keyword),
     ):
         ai_keywords_by_category[keyword.category].append(keyword)
+    visual_intelligence_result = latest_visual_intelligence_analysis(asset)
     return templates.TemplateResponse(
         request,
         "assets/detail.html",
@@ -746,7 +813,8 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
             "long_video_threshold_seconds": settings.long_video_threshold_seconds,
             "ai_keywords_by_category": dict(ai_keywords_by_category),
             "ai_result": latest_legacy_ai_enrichment(asset),
-            "visual_intelligence_result": latest_visual_intelligence_analysis(asset),
+            "visual_intelligence_result": visual_intelligence_result,
+            "visual_intelligence_view": visual_intelligence_view_model(visual_intelligence_result),
             "visual_profile_version": VISUAL_PROFILE_VERSION,
             "preview_public_url": preview_public_url,
         },

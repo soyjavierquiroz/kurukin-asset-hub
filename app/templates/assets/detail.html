@@ -11,13 +11,17 @@
   {{ value | join(", ") if value else "-" }}
 {% endmacro %}
 
-{% macro transform_status(label, transform, extra="") %}
+{% macro transform_detail(label, transform) %}
   <div class="fact">
     <dt>{{ label }}</dt>
     <dd>
-      {{ (transform.get("status") or "unknown") | upper if transform else "UNKNOWN" }}
-      {% if extra %}{{ extra }}{% endif %}
-      {% if transform and transform.get("reasons") %}<br><span>{{ transform.get("reasons") | join(", ") }}</span>{% endif %}
+      {{ transform.get("status") }}
+      · confidence {{ "%.2f"|format(transform.get("confidence")) if transform.get("confidence") is not none else "-" }}
+      {% if transform.get("reasons") %}<br>Reason: {{ transform.get("reasons") | join(", ") }}{% endif %}
+      <br>Blockers: {{ transform.get("blockers") | join(", ") if transform.get("blockers") else "none" }}
+      {% for label, value in transform.get("extras", {}).items() %}
+        <br>{{ label }}: {{ value | join(", ") if value is sequence and value is not string else value }}
+      {% endfor %}
     </dd>
   </div>
 {% endmacro %}
@@ -66,7 +70,8 @@
     {% set quality = visual.get("quality", {}) %}
     {% set garbage = visual.get("garbage", {}) %}
     {% set composition = visual.get("composition", {}) %}
-    {% set normalized_transforms = vi.get("normalized_transforms", {}) %}
+    {% set vi_view = visual_intelligence_view or {} %}
+    {% set transform_view = vi_view.get("transforms", {}) %}
 
     <section class="detail-panel">
       <h2>Preview</h2>
@@ -122,7 +127,8 @@
     <section class="detail-panel">
       <h2>Editorial / Visual Intelligence</h2>
       <dl class="facts">
-        {{ fact("Status", vi.get("status")) }}
+        {{ fact("Editorial status", asset.editorial_status) }}
+        {{ fact("Analysis status", vi.get("status")) }}
         {{ fact("Quality", quality.get("label") ~ " · " ~ ("%.2f"|format(quality.get("score"))) if quality.get("score") is not none else none) }}
         {{ fact("Vertical suitability", "%.2f"|format(composition.get("vertical_suitability")) if composition.get("vertical_suitability") is not none else none) }}
         {{ fact("Horizontal suitability", "%.2f"|format(composition.get("horizontal_suitability")) if composition.get("horizontal_suitability") is not none else none) }}
@@ -140,12 +146,29 @@
         {{ fact("Themes", csv(semantics.get("narrative_themes"))) }}
         {{ fact("Setting", semantics.get("setting")) }}
         {{ fact("Mood", semantics.get("mood")) }}
+        {{ fact("Contains people", semantics.get("contains_people")) }}
+        {{ fact("Visible text", semantics.get("visible_text")) }}
+        {{ fact("Logo or watermark", semantics.get("logo_or_watermark")) }}
         {{ fact("Possible uses", csv(semantics.get("possible_use_cases"))) }}
         {{ fact("Avoid uses", csv(semantics.get("negative_use_cases"))) }}
         {{ fact("Keywords", csv(semantics.get("keywords_es"))) }}
       </dl>
       <h3>Quality / Garbage</h3>
       <dl class="facts">
+        {{ fact("Quality score", quality.get("label") ~ " · " ~ ("%.2f"|format(quality.get("score"))) if quality.get("score") is not none else none) }}
+        {{ fact("Sharpness", "%.2f"|format(quality.get("sharpness")) if quality.get("sharpness") is not none else none) }}
+        {{ fact("Exposure", "%.2f"|format(quality.get("exposure")) if quality.get("exposure") is not none else none) }}
+        {{ fact("Stability", "%.2f"|format(quality.get("stability")) if quality.get("stability") is not none else none) }}
+        {{ fact("Lighting", "%.2f"|format(quality.get("lighting")) if quality.get("lighting") is not none else none) }}
+        {{ fact("Temporal consistency", "%.2f"|format(quality.get("temporal_consistency")) if quality.get("temporal_consistency") is not none else none) }}
+        {{ fact("Quality reason codes", csv(quality.get("reason_codes"))) }}
+        {{ fact("Garbage score", "%.2f"|format(garbage.get("score")) if garbage.get("score") is not none else none) }}
+        {{ fact("Is garbage", garbage.get("is_garbage")) }}
+        {{ fact("Black or blank", garbage.get("black_or_blank")) }}
+        {{ fact("Corrupted frames", garbage.get("corrupted_frames")) }}
+        {{ fact("Accidental capture", garbage.get("accidental_capture")) }}
+        {{ fact("Editorial usable", garbage.get("editorial_usable")) }}
+        {{ fact("Garbage reasons", csv(garbage.get("reasons"))) }}
         {{ fact("Out of frame", garbage.get("subject_severely_out_of_frame")) }}
         {{ fact("Bad clipping", garbage.get("subject_badly_clipped")) }}
         {{ fact("Social UI", garbage.get("social_media_ui")) }}
@@ -166,16 +189,18 @@
         {{ fact("Negative space", composition.get("negative_space")) }}
         {{ fact("Edge proximity", composition.get("edge_proximity")) }}
         {{ fact("Camera motion", composition.get("camera_motion") ~ " · " ~ composition.get("camera_motion_confidence") if composition.get("camera_motion") else none) }}
+        {{ fact("Safe text areas", csv(composition.get("safe_text_areas"))) }}
+        {{ fact("Crop risk reasons", csv(composition.get("crop_risk_reasons"))) }}
         {{ fact("Subject region", composition.get("subject_region")) }}
-        {{ fact("Trajectory", composition.get("subject_trajectory")) }}
+        {{ fact("Trajectory", vi_view.get("subject_trajectory_summary")) }}
       </dl>
       <h3>Transforms</h3>
       <dl class="facts">
-        {{ transform_status("Flip", normalized_transforms.get("flip_horizontal")) }}
-        {{ transform_status("Zoom", normalized_transforms.get("zoom"), " · max " ~ normalized_transforms.get("zoom", {}).get("max_safe_zoom") if normalized_transforms.get("zoom") else "") }}
-        {{ transform_status("Pan", normalized_transforms.get("pan"), " · " ~ (normalized_transforms.get("pan", {}).get("safe_directions") | join(", ")) if normalized_transforms.get("pan") else "") }}
-        {{ transform_status("Crop 9:16", normalized_transforms.get("crop_vertical")) }}
-        {{ transform_status("Crop 16:9", normalized_transforms.get("crop_horizontal")) }}
+        {{ transform_detail("Flip", transform_view.get("flip_horizontal")) }}
+        {{ transform_detail("Zoom", transform_view.get("zoom")) }}
+        {{ transform_detail("Pan", transform_view.get("pan")) }}
+        {{ transform_detail("Crop 9:16", transform_view.get("crop_vertical")) }}
+        {{ transform_detail("Crop 16:9", transform_view.get("crop_horizontal")) }}
       </dl>
       <h3>Provenance</h3>
       <dl class="facts">
