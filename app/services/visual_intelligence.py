@@ -793,6 +793,17 @@ def normalize_visual_payload(payload: Any) -> tuple[Any, list[str]]:
 
     transforms = normalized.get("transforms")
     if isinstance(transforms, dict):
+        zoom = transforms.get("zoom")
+        if isinstance(zoom, dict) and "max_safe_zoom" in zoom:
+            clean_zoom = normalized_float(zoom.get("max_safe_zoom"))
+            if clean_zoom is None:
+                zoom["max_safe_zoom"] = 1.0
+                warnings.append("transforms.zoom.max_safe_zoom_invalid_normalized")
+            elif clean_zoom < 1.0:
+                zoom["max_safe_zoom"] = 1.0
+                warnings.append("transforms.zoom.max_safe_zoom_below_identity_normalized")
+            else:
+                zoom["max_safe_zoom"] = clean_zoom
         pan = transforms.get("pan")
         if isinstance(pan, dict):
             for key in ("max_offset_x", "max_offset_y"):
@@ -1340,6 +1351,7 @@ def build_visual_intelligence_prompt(
         "- flip.allowed=true si no hay texto, logo, watermark, UI, direccionalidad semantica importante, lateralidad significativa ni otro blocker real, con confidence suficiente.\n"
         "- flip.allowed=false requiere risk_reasons concretas; no bloquees solo por postura asimetrica o manos asimetricas salvo que el flip cambie significado o introduzca inconsistencia semantica observable.\n"
         "- zoom.allowed indica seguridad, no necesidad: si un zoom pequeno conservador es seguro, allowed=true aunque el plano ya este bien encuadrado; si allowed=true, max_safe_zoom debe ser > 1.0 y nunca mayor a 1.10.\n"
+        "- zoom.max_safe_zoom nunca puede ser 0; el minimo valido es 1.0. 1.0 significa identity/no safe zoom. Si zoom.allowed=false, usa max_safe_zoom=1.0. Si zoom.allowed=true, max_safe_zoom debe ser > 1.0 y <= 1.10.\n"
         "- zoom.allowed=false solo por clipping, resolucion insuficiente, sujeto demasiado cerca del borde, perdida clara de contenido o blocker visual real; no uses no necesita zoom como risk_reason.\n"
         "- pan.allowed=true si un pan suave es seguro; camara estatica y margen suficiente son evidencia favorable. safe_directions debe tener al menos una direccion y max_offset_x/y valores conservadores > 0 cuando correspondan.\n"
         "- pan.allowed=false solo por movimiento de camara significativo, movimiento de sujeto incompatible, falta de margen o riesgo real de crop/clipping; no es necesario hacer pan no es blocker.\n"

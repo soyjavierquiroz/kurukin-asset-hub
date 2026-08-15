@@ -1628,6 +1628,66 @@ def test_visual_payload_normalizes_optional_transform_geometry() -> None:
     ]
 
 
+def test_visual_payload_normalizes_zoom_identity_when_disallowed(source: Source) -> None:
+    payload = good_visual_result(zoom_allowed=False).model_dump(mode="json")
+    payload["transforms"]["zoom"]["max_safe_zoom"] = 0.0
+    payload["transforms"]["zoom"]["confidence"] = 0.88
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "zoom-disallowed-identity"))
+
+    assert result.transforms.zoom.max_safe_zoom == 1.0
+    assert result.transforms.zoom.confidence == 0.88
+    assert transforms.zoom.status == "unknown"
+    assert transforms.zoom.allowed is False
+    assert transforms.zoom.max_safe_zoom == 1.0
+    assert warnings == ["transforms.zoom.max_safe_zoom_below_identity_normalized"]
+
+
+def test_visual_payload_normalizes_zoom_identity_to_unknown_when_allowed(source: Source) -> None:
+    payload = good_visual_result(zoom_allowed=True).model_dump(mode="json")
+    payload["transforms"]["zoom"]["max_safe_zoom"] = 0.0
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "zoom-allowed-identity"))
+
+    assert result.transforms.zoom.max_safe_zoom == 1.0
+    assert transforms.zoom.status == "unknown"
+    assert transforms.zoom.allowed is False
+    assert transforms.zoom.max_safe_zoom == 1.0
+    assert warnings == ["transforms.zoom.max_safe_zoom_below_identity_normalized"]
+    assert "transforms.zoom.allowed_true_without_safe_zoom" in transforms.consistency_warnings
+
+
+def test_visual_payload_keeps_valid_small_safe_zoom(source: Source) -> None:
+    payload = good_visual_result(zoom_allowed=True, max_safe_zoom=1.05).model_dump(mode="json")
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "zoom-small-safe"))
+
+    assert result.transforms.zoom.max_safe_zoom == 1.05
+    assert transforms.zoom.status == "safe"
+    assert transforms.zoom.allowed is True
+    assert transforms.zoom.max_safe_zoom == 1.05
+    assert warnings == []
+
+
+def test_visual_payload_normalizes_nonnumeric_zoom_to_identity() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["transforms"]["zoom"]["max_safe_zoom"] = "unsafe"
+    payload["transforms"]["zoom"]["confidence"] = 0.81
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.transforms.zoom.max_safe_zoom == 1.0
+    assert result.transforms.zoom.confidence == 0.81
+    assert warnings == ["transforms.zoom.max_safe_zoom_invalid_normalized"]
+
+
 def test_visual_payload_core_malformed_quality_score_still_fails() -> None:
     payload = good_visual_result().model_dump(mode="json")
     payload["quality"]["score"] = "excellent"
