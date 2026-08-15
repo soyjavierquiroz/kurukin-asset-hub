@@ -1099,6 +1099,9 @@ def test_visual_intelligence_prompt_does_not_anchor_transform_confidence(source:
 
     assert '"confidence": 0.0' not in prompt
     assert "Cada transforms.*.confidence es REQUIRED float 0.0..1.0" in prompt
+    assert "allowed significa SEGURIDAD/CAPACIDAD" in prompt
+    assert "No uses allowed=false porque el transform no hace falta" in prompt
+    assert "camara estatica y margen suficiente son evidencia favorable" in prompt
 
 
 def test_edge_subject_blocks_zoom(
@@ -1133,6 +1136,35 @@ def test_zoom_low_confidence_is_unknown_not_unsafe(source: Source) -> None:
     assert "low_confidence" in transforms.zoom.reasons
 
 
+def test_zoom_not_needed_is_not_a_real_blocker(source: Source) -> None:
+    result = good_visual_result(
+        zoom_allowed=False,
+        max_safe_zoom=1.05,
+        zoom_risk_reasons=["no necesita zoom"],
+        zoom_confidence=0.92,
+    )
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "zoom-not-needed"))
+
+    assert transforms.zoom.status == "unknown"
+    assert transforms.zoom.allowed is False
+    assert transforms.zoom.blockers == []
+    assert "no_necesita_zoom" not in transforms.zoom.reasons
+    assert "transforms.zoom.allowed_false_with_safe_zoom" in transforms.consistency_warnings
+
+
+def test_zoom_clipping_blocker_is_unsafe(source: Source) -> None:
+    payload = good_visual_result(zoom_allowed=True).model_dump(mode="json")
+    payload["garbage"]["subject_badly_clipped"] = True
+    result = VisualIntelligenceResult.model_validate(payload)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "zoom-clipped"))
+
+    assert transforms.zoom.status == "unsafe"
+    assert transforms.zoom.allowed is False
+    assert "subject_badly_clipped" in transforms.zoom.blockers
+
+
 def test_pan_policy_existing_motion_blocks_static_margin_allows(
     session: Session,
     source: Source,
@@ -1147,6 +1179,35 @@ def test_pan_policy_existing_motion_blocks_static_margin_allows(
     assert moving.pan.status == "unsafe"
     assert static.pan_allowed is True
     assert static.pan.status == "safe"
+
+
+def test_pan_static_camera_sufficient_margin_high_confidence_is_safe(source: Source) -> None:
+    result = good_visual_result(
+        camera_motion="static",
+        camera_motion_confidence=0.95,
+        negative_space=0.5,
+        edge_proximity=0.1,
+        pan_allowed=True,
+        pan_safe_directions=["left", "right"],
+        pan_confidence=0.94,
+    )
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "pan-static-margin"))
+
+    assert transforms.pan.status == "safe"
+    assert transforms.pan.allowed is True
+    assert transforms.pan.safe_directions == ["left", "right"]
+    assert transforms.pan.max_offset_x > 0
+
+
+def test_pan_insufficient_margin_blocker_is_unsafe(source: Source) -> None:
+    result = good_visual_result(edge_proximity=0.7, negative_space=0.1, pan_allowed=True)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "pan-no-margin"))
+
+    assert transforms.pan.status == "unsafe"
+    assert transforms.pan.allowed is False
+    assert "insufficient_composition_margin" in transforms.pan.blockers
 
 
 def test_pan_low_confidence_is_unknown_not_unsafe(source: Source) -> None:
@@ -1188,6 +1249,65 @@ def test_crop_low_confidence_is_unknown_and_known_cut_is_unsafe(source: Source) 
     assert unsafe.crop_vertical.status == "unsafe"
     assert unsafe.crop_vertical.allowed is False
     assert "cuts_subject" in unsafe.crop_vertical.blockers
+
+
+def test_flip_clean_high_confidence_without_directionality_is_safe(source: Source) -> None:
+    result = good_visual_result(flip_allowed=True, flip_confidence=0.93, flip_risk_reasons=[])
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "flip-safe"))
+
+    assert transforms.flip_horizontal.status == "safe"
+    assert transforms.flip_horizontal.allowed is True
+
+
+def test_flip_asymmetric_hands_alone_is_not_unsafe(source: Source) -> None:
+    result = good_visual_result(
+        flip_allowed=False,
+        flip_confidence=0.93,
+        flip_risk_reasons=["manos asimetricas"],
+    )
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "flip-hands-only"))
+
+    assert transforms.flip_horizontal.status == "unknown"
+    assert transforms.flip_horizontal.allowed is False
+    assert transforms.flip_horizontal.blockers == []
+
+
+def test_flip_high_confidence_false_empty_risks_is_unknown_with_warning(source: Source) -> None:
+    result = good_visual_result(flip_allowed=False, flip_confidence=0.93, flip_risk_reasons=[])
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "flip-empty-risk"))
+
+    assert transforms.flip_horizontal.status == "unknown"
+    assert transforms.flip_horizontal.allowed is False
+    assert "transforms.flip.allowed_false_high_confidence_empty_risk_reasons" in transforms.consistency_warnings
+
+
+def test_crop_allowed_true_without_safe_rect_is_unknown_with_warning(source: Source) -> None:
+    result = good_visual_result(crop_vertical_allowed=True, crop_vertical_safe_rect_null=True)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "crop-null-rect"))
+
+    assert transforms.crop_vertical.status == "unknown"
+    assert transforms.crop_vertical.allowed is False
+    assert transforms.crop_vertical.safe_rect is None
+    assert "geometry_unavailable" in transforms.crop_vertical.reasons
+    assert "transforms.crop_vertical.allowed_true_null_safe_rect" in transforms.consistency_warnings
+
+
+def test_crop_allowed_true_with_valid_safe_rect_high_confidence_is_safe(source: Source) -> None:
+    result = good_visual_result(
+        crop_vertical_allowed=True,
+        crop_vertical_safe_rect=[0.1, 0.0, 0.8, 1.0],
+        crop_vertical_confidence=0.93,
+    )
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "crop-valid-rect"))
+
+    assert transforms.crop_vertical.status == "safe"
+    assert transforms.crop_vertical.allowed is True
+    assert transforms.crop_vertical.safe_rect == [0.1, 0.0, 0.8, 1.0]
 
 
 def test_visual_status_failed_is_current(
@@ -1589,9 +1709,16 @@ def good_visual_result(
     flip_risk_reasons: list[str] | None = None,
     zoom_allowed: bool = True,
     zoom_confidence: float = 0.9,
+    zoom_risk_reasons: list[str] | None = None,
+    pan_allowed: bool = True,
+    pan_safe_directions: list[str] | None = None,
     pan_confidence: float = 0.9,
     crop_vertical_allowed: bool = True,
     crop_horizontal_allowed: bool = True,
+    crop_vertical_safe_rect: list[float] | None = None,
+    crop_horizontal_safe_rect: list[float] | None = None,
+    crop_vertical_safe_rect_null: bool = False,
+    crop_horizontal_safe_rect_null: bool = False,
     crop_vertical_confidence: float = 0.9,
     crop_horizontal_confidence: float = 0.9,
     crop_vertical_risk_reasons: list[str] | None = None,
@@ -1670,11 +1797,11 @@ def good_visual_result(
                     "allowed": zoom_allowed,
                     "max_safe_zoom": max_safe_zoom,
                     "confidence": zoom_confidence,
-                    "risk_reasons": [],
+                    "risk_reasons": zoom_risk_reasons or [],
                 },
                 "pan": {
-                    "allowed": True,
-                    "safe_directions": ["left", "right"],
+                    "allowed": pan_allowed,
+                    "safe_directions": ["left", "right"] if pan_safe_directions is None else pan_safe_directions,
                     "max_offset_x": 0.08,
                     "max_offset_y": 0.05,
                     "confidence": pan_confidence,
@@ -1682,14 +1809,22 @@ def good_visual_result(
                 },
                 "crop_vertical": {
                     "allowed": crop_vertical_allowed,
-                    "safe_rect": [0.15, 0.0, 0.7, 1.0],
+                    "safe_rect": (
+                        None
+                        if crop_vertical_safe_rect_null
+                        else crop_vertical_safe_rect or [0.15, 0.0, 0.7, 1.0]
+                    ),
                     "confidence": crop_vertical_confidence,
                     "preferred_aspect_ratios": ["9:16"],
                     "risk_reasons": crop_vertical_risk_reasons or [],
                 },
                 "crop_horizontal": {
                     "allowed": crop_horizontal_allowed,
-                    "safe_rect": [0.0, 0.2, 1.0, 0.6],
+                    "safe_rect": (
+                        None
+                        if crop_horizontal_safe_rect_null
+                        else crop_horizontal_safe_rect or [0.0, 0.2, 1.0, 0.6]
+                    ),
                     "confidence": crop_horizontal_confidence,
                     "preferred_aspect_ratios": ["16:9"],
                     "risk_reasons": crop_horizontal_risk_reasons or [],

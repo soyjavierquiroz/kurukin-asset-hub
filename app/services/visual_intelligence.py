@@ -130,6 +130,7 @@ class NormalizedVisualTransforms:
     crop_vertical: NormalizedCropDecision
     crop_horizontal: NormalizedCropDecision
     safe_text_areas: list[str]
+    consistency_warnings: list[str]
 
     @property
     def flip_allowed(self) -> bool:
@@ -892,6 +893,7 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
     garbage = result.garbage
     semantics = result.semantics
     composition = result.composition
+    consistency_warnings: list[str] = []
     flip_blockers: list[str] = []
     if semantics.visible_text:
         flip_blockers.append("visible_text")
@@ -907,6 +909,13 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
         flip_blockers.append("directionality")
     if has_lateral_semantic_risk(result.transforms.flip.risk_reasons):
         flip_blockers.append("lateral_semantic_meaning")
+    if (
+        not result.transforms.flip.allowed
+        and result.transforms.flip.confidence >= HIGH_CONFIDENCE_THRESHOLD
+        and not result.transforms.flip.risk_reasons
+        and not flip_blockers
+    ):
+        consistency_warnings.append("transforms.flip.allowed_false_high_confidence_empty_risk_reasons")
     flip_decision = normalized_basic_decision(
         requested_allowed=result.transforms.flip.allowed,
         confidence=result.transforms.flip.confidence,
@@ -916,7 +925,17 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
 
     max_safe_zoom = min(float(result.transforms.zoom.max_safe_zoom), MAX_VISUAL_V1_ZOOM)
     zoom_blockers: list[str] = []
-    zoom_reasons = list(result.transforms.zoom.risk_reasons)
+    zoom_reasons = risk_reasons_only(result.transforms.zoom.risk_reasons)
+    if not result.transforms.zoom.allowed and result.transforms.zoom.max_safe_zoom > 1.0:
+        consistency_warnings.append("transforms.zoom.allowed_false_with_safe_zoom")
+    if (
+        not result.transforms.zoom.allowed
+        and result.transforms.zoom.confidence >= HIGH_CONFIDENCE_THRESHOLD
+        and not zoom_reasons
+    ):
+        consistency_warnings.append("transforms.zoom.allowed_false_high_confidence_empty_risk_reasons")
+    if result.transforms.zoom.allowed and max_safe_zoom <= 1.0:
+        consistency_warnings.append("transforms.zoom.allowed_true_without_safe_zoom")
     if composition.edge_proximity >= 0.80 or garbage.subject_badly_clipped:
         max_safe_zoom = 1.0
         if garbage.subject_badly_clipped:
@@ -948,7 +967,17 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
     )
 
     pan_blockers: list[str] = []
-    pan_reasons = list(result.transforms.pan.risk_reasons)
+    pan_reasons = risk_reasons_only(result.transforms.pan.risk_reasons)
+    pan_safe_directions = list(result.transforms.pan.safe_directions)
+    if result.transforms.pan.allowed and not pan_safe_directions:
+        consistency_warnings.append("transforms.pan.allowed_true_empty_safe_directions")
+        pan_reasons.append("geometry_or_trajectory_unavailable")
+    if (
+        not result.transforms.pan.allowed
+        and result.transforms.pan.confidence >= HIGH_CONFIDENCE_THRESHOLD
+        and not pan_reasons
+    ):
+        consistency_warnings.append("transforms.pan.allowed_false_high_confidence_empty_risk_reasons")
     if composition.camera_motion not in {"static", "unknown"}:
         pan_blockers.append("existing_camera_motion")
     if high_subject_trajectory_motion(result):
@@ -958,7 +987,7 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
     if composition.camera_motion == "unknown" or composition.camera_motion_confidence < LOW_CONFIDENCE_THRESHOLD:
         pan_reasons.append("geometry_or_trajectory_unavailable")
     pan_decision_base = normalized_basic_decision(
-        requested_allowed=result.transforms.pan.allowed,
+        requested_allowed=result.transforms.pan.allowed and bool(pan_safe_directions),
         confidence=min(result.transforms.pan.confidence, composition.camera_motion_confidence),
         blockers=pan_blockers,
         reasons=pan_reasons,
@@ -971,17 +1000,35 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
         confidence=pan_decision_base.confidence,
         blockers=pan_decision_base.blockers,
         reasons=pan_decision_base.reasons,
-        safe_directions=result.transforms.pan.safe_directions if pan_decision_base.allowed else [],
+        safe_directions=pan_safe_directions if pan_decision_base.allowed else [],
         max_offset_x=pan_max_offset_x,
         max_offset_y=pan_max_offset_y,
     )
 
+    if result.transforms.crop_vertical.allowed and result.transforms.crop_vertical.safe_rect is None:
+        consistency_warnings.append("transforms.crop_vertical.allowed_true_null_safe_rect")
+    if (
+        not result.transforms.crop_vertical.allowed
+        and result.transforms.crop_vertical.confidence >= HIGH_CONFIDENCE_THRESHOLD
+        and not result.transforms.crop_vertical.risk_reasons
+        and not composition.crop_risk_reasons
+    ):
+        consistency_warnings.append("transforms.crop_vertical.allowed_false_high_confidence_empty_risk_reasons")
     crop_vertical_decision = normalized_crop_decision(
         allowed=result.transforms.crop_vertical.allowed,
         safe_rect=result.transforms.crop_vertical.safe_rect,
         confidence=result.transforms.crop_vertical.confidence,
         reasons=[*result.transforms.crop_vertical.risk_reasons, *composition.crop_risk_reasons],
     )
+    if result.transforms.crop_horizontal.allowed and result.transforms.crop_horizontal.safe_rect is None:
+        consistency_warnings.append("transforms.crop_horizontal.allowed_true_null_safe_rect")
+    if (
+        not result.transforms.crop_horizontal.allowed
+        and result.transforms.crop_horizontal.confidence >= HIGH_CONFIDENCE_THRESHOLD
+        and not result.transforms.crop_horizontal.risk_reasons
+        and not composition.crop_risk_reasons
+    ):
+        consistency_warnings.append("transforms.crop_horizontal.allowed_false_high_confidence_empty_risk_reasons")
     crop_horizontal_decision = normalized_crop_decision(
         allowed=result.transforms.crop_horizontal.allowed,
         safe_rect=result.transforms.crop_horizontal.safe_rect,
@@ -996,6 +1043,7 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
         crop_vertical=crop_vertical_decision,
         crop_horizontal=crop_horizontal_decision,
         safe_text_areas=composition.safe_text_areas,
+        consistency_warnings=dedupe_codes(consistency_warnings),
     )
 
 
@@ -1007,7 +1055,7 @@ def normalized_basic_decision(
     reasons: list[str],
 ) -> NormalizedTransformDecision:
     clean_blockers = dedupe_codes(blockers)
-    clean_reasons = dedupe_codes([*reasons, *clean_blockers])
+    clean_reasons = dedupe_codes([*risk_reasons_only(reasons), *clean_blockers])
     if confidence < LOW_CONFIDENCE_THRESHOLD:
         clean_reasons = dedupe_codes([*clean_reasons, "low_confidence"])
     if clean_blockers:
@@ -1042,8 +1090,8 @@ def normalized_crop_decision(
     confidence: float,
     reasons: list[str],
 ) -> NormalizedCropDecision:
-    crop_blockers = [reason for reason in reasons if reason in {"cuts_subject", "cuts_text", "cuts_logo", "bad_crop"}]
-    crop_reasons = list(reasons)
+    crop_reasons = risk_reasons_only(reasons)
+    crop_blockers = [reason for reason in crop_reasons if reason in {"cuts_subject", "cuts_text", "cuts_logo", "bad_crop"}]
     if allowed and safe_rect is None:
         crop_reasons.append("geometry_unavailable")
     base = normalized_basic_decision(
@@ -1065,7 +1113,6 @@ def normalized_crop_decision(
 def has_lateral_semantic_risk(reasons: list[str]) -> bool:
     lateral_reasons = {
         "handedness",
-        "hands_asymmetric",
         "lateral_semantic_meaning",
         "directionality",
         "signage",
@@ -1073,6 +1120,41 @@ def has_lateral_semantic_risk(reasons: list[str]) -> bool:
         "numbers",
     }
     return any(dedupe_codes([reason])[0] in lateral_reasons for reason in reasons if dedupe_codes([reason]))
+
+
+def risk_reasons_only(reasons: list[str]) -> list[str]:
+    return [reason for reason in reasons if not is_non_risk_transform_reason(reason)]
+
+
+def is_non_risk_transform_reason(reason: str) -> bool:
+    code = dedupe_codes([reason])
+    if not code:
+        return True
+    value = code[0]
+    non_risk_patterns = (
+        "no_necesita",
+        "not_needed",
+        "not_necessary",
+        "unnecessary",
+        "ya_esta_bien",
+        "bien_encuadrado",
+        "well_framed",
+        "already_framed",
+        "already_well_composed",
+        "no_improvement",
+        "does_not_improve",
+        "opcional",
+        "optional",
+        "camara_estatica",
+        "camera_static",
+        "static_camera",
+        "margen_suficiente",
+        "sufficient_margin",
+        "enough_margin",
+        "no_recommend",
+        "not_recommended",
+    )
+    return any(pattern in value for pattern in non_risk_patterns)
 
 
 def has_directional_signal(result: VisualIntelligenceResult) -> bool:
@@ -1252,10 +1334,16 @@ def build_visual_intelligence_prompt(
         "- composition evalua encuadre, posicion del sujeto, trayectoria opcional, suitability vertical/horizontal, movimiento de camara y zonas seguras de texto.\n"
         "- camera_motion solo puede ser static, pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, handheld, tracking, high_motion o unknown.\n"
         "- camera_motion_confidence es REQUIRED float 0.0..1.0 y debe estimar evidencia real del movimiento de camara.\n"
-        "- flip.allowed=false si hay texto, logos, watermark, UI social, CTAs, direccionalidad clara, manos asimetricas o señales culturales.\n"
-        "- zoom.allowed=false si el sujeto ya esta recortado, cerca de bordes, hay texto importante o poca resolucion visual; no recomiendes max_safe_zoom mayor a 1.10.\n"
-        "- pan.allowed=true solo cuando hay margen compositivo; safe_directions indica direcciones sin cortar sujeto.\n"
-        "- crop_vertical y crop_horizontal son decisiones independientes; no infieras una desde la otra.\n"
+        "- transforms.*.allowed significa SEGURIDAD/CAPACIDAD: true si la transformacion puede aplicarse conservadoramente sin danar contenido importante ni introducir errores visuales o semanticos; false solo si existe evidencia de que NO es seguro aplicarla.\n"
+        "- No uses allowed=false porque el transform no hace falta, el plano ya esta bien compuesto, no mejora el plano, seria opcional o no lo elegirias editorialmente. MPT decide si aplicar transforms; Asset Hub solo decide seguridad/capacidad.\n"
+        "- risk_reasons contiene solo riesgos o blockers reales; no incluyas razones positivas/editoriales como camara estatica, margen suficiente, no necesita acercamiento o ya esta bien encuadrado.\n"
+        "- flip.allowed=true si no hay texto, logo, watermark, UI, direccionalidad semantica importante, lateralidad significativa ni otro blocker real, con confidence suficiente.\n"
+        "- flip.allowed=false requiere risk_reasons concretas; no bloquees solo por postura asimetrica o manos asimetricas salvo que el flip cambie significado o introduzca inconsistencia semantica observable.\n"
+        "- zoom.allowed indica seguridad, no necesidad: si un zoom pequeno conservador es seguro, allowed=true aunque el plano ya este bien encuadrado; si allowed=true, max_safe_zoom debe ser > 1.0 y nunca mayor a 1.10.\n"
+        "- zoom.allowed=false solo por clipping, resolucion insuficiente, sujeto demasiado cerca del borde, perdida clara de contenido o blocker visual real; no uses no necesita zoom como risk_reason.\n"
+        "- pan.allowed=true si un pan suave es seguro; camara estatica y margen suficiente son evidencia favorable. safe_directions debe tener al menos una direccion y max_offset_x/y valores conservadores > 0 cuando correspondan.\n"
+        "- pan.allowed=false solo por movimiento de camara significativo, movimiento de sujeto incompatible, falta de margen o riesgo real de crop/clipping; no es necesario hacer pan no es blocker.\n"
+        "- crop_vertical y crop_horizontal son decisiones independientes; no infieras una desde la otra. Si allowed=true, safe_rect DEBE estar presente y ser valido. Si no puedes estimar geometria segura, allowed=false y puedes incluir geometry_unavailable.\n"
         "- Cada transforms.*.confidence es REQUIRED float 0.0..1.0, estimado independientemente segun evidencia real de los frames/contact-sheet.\n"
         "- No uses 0.0 como placeholder ni copies valores de ejemplo; 0.0 solo aplica cuando literalmente no existe evidencia util para evaluar ese transform.\n"
         "- subject_region DEBE ser null o [x,y,w,h] con coordenadas numericas normalizadas 0..1; nunca palabras como center, centro, left o right.\n"
@@ -1386,6 +1474,12 @@ def visual_result_json(
     decision: VisualEditorialDecision | None = None,
     transforms: NormalizedVisualTransforms | None = None,
 ) -> dict[str, Any]:
+    normalization_warnings = dedupe_codes(
+        [
+            *list(getattr(result, "_normalization_warnings", [])),
+            *(transforms.consistency_warnings if transforms else []),
+        ]
+    )
     return {
         "analysis_type": VISUAL_ANALYSIS_TYPE,
         "profile_version": profile_version,
@@ -1395,7 +1489,7 @@ def visual_result_json(
         "frame_count": len(inputs.frame_paths),
         "frame_cache_path": str(inputs.frame_cache_dir),
         "frames": [path.name for path in inputs.frame_paths],
-        "normalization_warnings": list(getattr(result, "_normalization_warnings", [])),
+        "normalization_warnings": normalization_warnings,
         "attempt_count": getattr(result, "_attempt_count", 1),
         "final_error": getattr(result, "_final_error", None),
         "visual": result.model_dump(mode="json"),
