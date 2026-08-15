@@ -580,6 +580,33 @@ def test_visual_model_is_stored_in_provenance(
     assert analysis.result_json["model"] == "visual-model"
 
 
+def test_visual_normalization_warnings_are_stored_in_provenance(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "visual-normalization-provenance")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    result = good_visual_result()
+    object.__setattr__(
+        result,
+        "_normalization_warnings",
+        ["composition.subject_region_dropped"],
+    )
+
+    visual.analyze_asset_visual_intelligence(
+        session,
+        asset.id,
+        visual_caller=lambda _prompt, _frames: result,
+    )
+
+    analysis = latest_analysis(session, asset)
+    assert analysis.result_json["normalization_warnings"] == ["composition.subject_region_dropped"]
+
+
 def test_call_nvidia_visual_intelligence_uses_single_image_and_token_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1090,6 +1117,117 @@ def test_visual_force_recalculates_current_asset(
 
     assert len(asset.ai_analyses) == 2
     assert asset.asset_uid == original_uid
+
+
+def test_visual_payload_normalizes_subject_region_string_to_null() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["composition"]["subject_region"] = "centro"
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.composition.subject_region is None
+    assert warnings == ["composition.subject_region_dropped"]
+
+
+def test_visual_payload_normalizes_subject_trajectory_strings_to_empty() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["composition"]["subject_trajectory"] = ["caminar", "girar"]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.composition.subject_trajectory == []
+    assert warnings == ["composition.subject_trajectory_invalid_items_dropped"]
+
+
+def test_visual_payload_keeps_only_valid_mixed_trajectory_points() -> None:
+    valid_point = {"timestamp": 1.25, "center": [0.5, 0.45], "bbox": [0.2, 0.1, 0.5, 0.8]}
+    payload = good_visual_result().model_dump(mode="json")
+    payload["composition"]["subject_trajectory"] = [
+        valid_point,
+        "stationary",
+        {"timestamp": -1, "center": [0.4], "bbox": "center"},
+    ]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert len(result.composition.subject_trajectory) == 1
+    assert result.composition.subject_trajectory[0].timestamp == valid_point["timestamp"]
+    assert result.composition.subject_trajectory[0].center == valid_point["center"]
+    assert result.composition.subject_trajectory[0].bbox == valid_point["bbox"]
+    assert warnings == ["composition.subject_trajectory_invalid_items_dropped"]
+
+
+def test_visual_payload_normalizes_optional_transform_geometry() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["transforms"]["crop_vertical"]["safe_rect"] = "center"
+    payload["transforms"]["crop_horizontal"]["safe_rect"] = {"x": 0.2}
+    payload["transforms"]["crop"] = {
+        "allowed": True,
+        "safe_rect": ["left", 0.0, 1.0, 1.0],
+        "confidence": 0.8,
+        "preferred_aspect_ratios": ["1:1"],
+        "risk_reasons": [],
+    }
+    payload["transforms"]["pan"]["max_offset_x"] = "unknown"
+    payload["transforms"]["pan"]["max_offset_y"] = 0.2
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.transforms.crop_vertical.safe_rect is None
+    assert result.transforms.crop_horizontal.safe_rect is None
+    assert result.transforms.crop is not None
+    assert result.transforms.crop.safe_rect is None
+    assert result.transforms.pan.max_offset_x is None
+    assert result.transforms.pan.max_offset_y == 0.2
+    assert warnings == [
+        "transforms.pan.max_offset_x_dropped",
+        "transforms.crop_vertical.safe_rect_dropped",
+        "transforms.crop_horizontal.safe_rect_dropped",
+        "transforms.crop.safe_rect_dropped",
+    ]
+
+
+def test_visual_payload_core_malformed_quality_score_still_fails() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["quality"]["score"] = "excellent"
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+
+    assert warnings == []
+    with pytest.raises(Exception):
+        VisualIntelligenceResult.model_validate(normalized)
+
+
+def test_call_nvidia_visual_intelligence_records_normalization_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["composition"]["subject_region"] = "centro"
+    payload["composition"]["subject_trajectory"] = ["caminar", "girar"]
+    payload["transforms"]["crop_vertical"]["safe_rect"] = "center"
+    payload["transforms"]["pan"]["max_offset_x"] = "unknown"
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual, "post_chat_completion", lambda *_args, **_kwargs: json.dumps(payload))
+
+    result = visual.call_nvidia_visual_intelligence("prompt", [tmp_path / "contact-sheet.jpg"])
+
+    assert result.composition.subject_region is None
+    assert result.composition.subject_trajectory == []
+    assert result.transforms.crop_vertical.safe_rect is None
+    assert result.transforms.pan.max_offset_x is None
+    assert getattr(result, "_normalization_warnings") == [
+        "composition.subject_region_dropped",
+        "composition.subject_trajectory_invalid_items_dropped",
+        "transforms.pan.max_offset_x_dropped",
+        "transforms.crop_vertical.safe_rect_dropped",
+    ]
 
 
 class FakeCompletedProcess:

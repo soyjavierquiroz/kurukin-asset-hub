@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -657,9 +659,109 @@ def call_nvidia_visual_intelligence(
     )
     try:
         payload = json.loads(extract_json_object(text))
+        payload, normalization_warnings = normalize_visual_payload(payload)
     except Exception as exc:
         raise VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON") from exc
-    return VisualIntelligenceResult.model_validate(payload)
+    result = VisualIntelligenceResult.model_validate(payload)
+    object.__setattr__(result, "_normalization_warnings", normalization_warnings)
+    return result
+
+
+def normalize_visual_payload(payload: Any) -> tuple[Any, list[str]]:
+    if not isinstance(payload, dict):
+        return payload, []
+    normalized = deepcopy(payload)
+    warnings: list[str] = []
+    composition = normalized.get("composition")
+    if isinstance(composition, dict):
+        subject_region = composition.get("subject_region")
+        if subject_region is not None:
+            clean_region = normalized_float_list(subject_region, 4)
+            if clean_region is None:
+                composition["subject_region"] = None
+                warnings.append("composition.subject_region_dropped")
+            else:
+                composition["subject_region"] = clean_region
+
+        subject_trajectory = composition.get("subject_trajectory")
+        if subject_trajectory is not None:
+            clean_trajectory = normalized_subject_trajectory(subject_trajectory)
+            if clean_trajectory is None:
+                composition["subject_trajectory"] = []
+                warnings.append("composition.subject_trajectory_dropped")
+            else:
+                if len(clean_trajectory) != len(subject_trajectory):
+                    warnings.append("composition.subject_trajectory_invalid_items_dropped")
+                composition["subject_trajectory"] = clean_trajectory
+
+    transforms = normalized.get("transforms")
+    if isinstance(transforms, dict):
+        pan = transforms.get("pan")
+        if isinstance(pan, dict):
+            for key in ("max_offset_x", "max_offset_y"):
+                if key in pan and pan[key] is not None:
+                    clean_offset = normalized_float(pan[key], minimum=0.0, maximum=1.0)
+                    if clean_offset is None:
+                        pan[key] = None
+                        warnings.append(f"transforms.pan.{key}_dropped")
+                    else:
+                        pan[key] = clean_offset
+        for key in ("crop_vertical", "crop_horizontal", "crop"):
+            crop = transforms.get(key)
+            if isinstance(crop, dict):
+                safe_rect = crop.get("safe_rect")
+                if safe_rect is not None:
+                    clean_rect = normalized_float_list(safe_rect, 4)
+                    if clean_rect is None:
+                        crop["safe_rect"] = None
+                        warnings.append(f"transforms.{key}.safe_rect_dropped")
+                    else:
+                        crop["safe_rect"] = clean_rect
+    return normalized, warnings
+
+
+def normalized_subject_trajectory(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    points: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        timestamp = normalized_float(item.get("timestamp"), minimum=0.0)
+        center = normalized_float_list(item.get("center"), 2)
+        bbox = normalized_float_list(item.get("bbox"), 4)
+        if timestamp is None or center is None or bbox is None:
+            continue
+        points.append({"timestamp": timestamp, "center": center, "bbox": bbox})
+    return points
+
+
+def normalized_float_list(value: Any, length: int) -> list[float] | None:
+    if not isinstance(value, list) or len(value) != length:
+        return None
+    items: list[float] = []
+    for item in value:
+        number = normalized_float(item)
+        if number is None:
+            return None
+        items.append(number)
+    return items
+
+
+def normalized_float(value: Any, *, minimum: float | None = None, maximum: float | None = None) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    if minimum is not None and number < minimum:
+        return None
+    if maximum is not None and number > maximum:
+        return None
+    return number
 
 
 def decide_visual_editorial_status(result: VisualIntelligenceResult) -> VisualEditorialDecision:
@@ -952,8 +1054,10 @@ def build_visual_intelligence_prompt(
         "- zoom.allowed=false si el sujeto ya esta recortado, cerca de bordes, hay texto importante o poca resolucion visual; no recomiendes max_safe_zoom mayor a 1.10.\n"
         "- pan.allowed=true solo cuando hay margen compositivo; safe_directions indica direcciones sin cortar sujeto.\n"
         "- crop_vertical y crop_horizontal son decisiones independientes; no infieras una desde la otra.\n"
-        "- safe_rect y subject_region son normalizados [x,y,w,h] 0..1 y pueden ser null si no hay confianza.\n"
-        "- subject_trajectory puede ser [] si no se infiere con confianza.\n"
+        "- subject_region DEBE ser null o [x,y,w,h] con coordenadas numericas normalizadas 0..1; nunca palabras como center, centro, left o right.\n"
+        "- subject_trajectory DEBE ser [] o array de objetos {timestamp, center:[x,y], bbox:[x,y,w,h]}; nunca acciones o direcciones como strings.\n"
+        "- safe_rect DEBE ser null o [x,y,w,h] con coordenadas numericas normalizadas 0..1.\n"
+        "- Prefiere null o [] antes que geometria estimada sin confianza.\n"
         "- preferred_aspect_ratios solo puede usar 9:16, 16:9, 1:1 o 4:5.\n"
         "- safe_text_areas solo puede usar top, middle, bottom, left, right o none.\n"
         "- label debe ser excellent, good, usable, weak o bad.\n\n"
@@ -1085,6 +1189,7 @@ def visual_result_json(
         "frame_count": len(inputs.frame_paths),
         "frame_cache_path": str(inputs.frame_cache_dir),
         "frames": [path.name for path in inputs.frame_paths],
+        "normalization_warnings": list(getattr(result, "_normalization_warnings", [])),
         "visual": result.model_dump(mode="json"),
         "editorial_policy": {
             "status": decision.status if decision else None,
