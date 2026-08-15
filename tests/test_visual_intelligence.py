@@ -415,6 +415,7 @@ def test_visual_provider_500_is_operational_not_rejected_and_keeps_asset_uid(
 
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
     get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(visual, "post_chat_completion", fail_provider)
 
     analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
@@ -424,6 +425,165 @@ def test_visual_provider_500_is_operational_not_rejected_and_keeps_asset_uid(
     assert analysis.result_json["error_type"] == "operational_failure"
     assert analyzed.editorial_status != "rejected"
     assert analyzed.asset_uid == original_uid
+
+
+def test_visual_provider_503_then_success_marks_asset_ready(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-503-retry")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def flaky_provider(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise NvidiaProviderError("ResourceExhausted: Worker local total request limit reached HTTP 503")
+        return good_visual_result().model_dump_json()
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(visual, "post_chat_completion", flaky_provider)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 2
+    assert analysis.result_json["status"] == "ready"
+    assert analysis.result_json["attempt_count"] == 2
+    assert analysis.result_json["final_error"] is None
+    assert analyzed.asset_uid == original_uid
+
+
+def test_visual_provider_timeout_then_success_marks_asset_ready(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-timeout-retry")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def flaky_provider(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise NvidiaProviderError("read operation timed out")
+        return good_visual_result().model_dump_json()
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(visual, "post_chat_completion", flaky_provider)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 2
+    assert analysis.result_json["status"] == "ready"
+    assert analysis.result_json["attempt_count"] == 2
+
+
+def test_visual_provider_503_exhausted_is_retryable_operational_failure(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-503-exhausted")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def fail_provider(*_args, **_kwargs):
+        calls["count"] += 1
+        raise NvidiaProviderError("ResourceExhausted: Worker local total request limit reached HTTP 503")
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(visual, "post_chat_completion", fail_provider)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 4
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["error_type"] == "operational_failure"
+    assert analysis.result_json["retryable"] is True
+    assert analysis.result_json["attempt_count"] == 4
+    assert "HTTP 503" in analysis.result_json["final_error"]
+    assert analyzed.editorial_status != "rejected"
+    assert analyzed.asset_uid == original_uid
+
+
+def test_visual_validation_error_does_not_retry(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-validation-no-retry")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def invalid_payload(*_args, **_kwargs):
+        calls["count"] += 1
+        return "{}"
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("validation should not retry"))
+    monkeypatch.setattr(visual, "post_chat_completion", invalid_payload)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 1
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["attempt_count"] == 1
+
+
+def test_visual_provider_401_does_not_retry(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-401-no-retry")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def auth_failure(*_args, **_kwargs):
+        calls["count"] += 1
+        raise NvidiaProviderError("HTTP 401 Unauthorized")
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("401 should not retry"))
+    monkeypatch.setattr(visual, "post_chat_completion", auth_failure)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 1
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["retryable"] is False
+    assert analysis.result_json["attempt_count"] == 1
 
 
 def test_visual_v2_uses_separate_frame_cache_dir(

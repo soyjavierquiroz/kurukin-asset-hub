@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import shutil
+import socket
 import subprocess
+import time
+import urllib.error
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -23,7 +27,7 @@ from app.schemas.visual_intelligence import (
     VISUAL_PROFILE_VERSION,
     VisualIntelligenceResult,
 )
-from app.services.ai_providers.nvidia_provider import extract_json_object, post_chat_completion
+from app.services.ai_providers.nvidia_provider import NvidiaProviderError, extract_json_object, post_chat_completion
 from app.services.ai_providers.openai_provider import sanitize_provider_error
 from app.services.asset_location import AssetLocationError, resolve_asset_rclone_location
 from app.services.asset_preview import parse_ffprobe_metadata, run_ffprobe, safe_asset_uid
@@ -37,6 +41,8 @@ MIN_CACHED_VISUAL_FRAMES = 8
 CONTACT_SHEET_FILENAME = "contact-sheet.jpg"
 CONTACT_SHEET_MAX_DIMENSION = 1800
 VISUAL_V1_NVIDIA_MAX_TOKENS = 2400
+VISUAL_NVIDIA_RETRY_DELAYS = (5.0, 15.0, 30.0)
+TRANSIENT_NVIDIA_HTTP_STATUSES = {429, 500, 502, 503, 504}
 MAX_VISUAL_V1_ZOOM = 1.10
 HARD_REJECT_FLAGS = (
     "subject_severely_out_of_frame",
@@ -714,13 +720,25 @@ def call_nvidia_visual_intelligence(
     settings = get_settings()
     if not settings.nvidia_api_key:
         raise VisualIntelligenceOperationalError("NVIDIA_API_KEY is not configured")
-    text = post_chat_completion(
-        prompt,
-        image_paths,
-        settings.nvidia_visual_model,
-        timeout_seconds=90.0,
-        max_tokens=VISUAL_V1_NVIDIA_MAX_TOKENS,
-    )
+    attempt_count = 0
+    while True:
+        attempt_count += 1
+        try:
+            text = post_chat_completion(
+                prompt,
+                image_paths,
+                settings.nvidia_visual_model,
+                timeout_seconds=90.0,
+                max_tokens=VISUAL_V1_NVIDIA_MAX_TOKENS,
+            )
+            break
+        except NvidiaProviderError as exc:
+            if attempt_count > len(VISUAL_NVIDIA_RETRY_DELAYS) or not is_transient_nvidia_error(exc):
+                object.__setattr__(exc, "_visual_attempt_count", attempt_count)
+                object.__setattr__(exc, "_visual_final_error", sanitize_provider_error(str(exc)))
+                raise
+            delay = VISUAL_NVIDIA_RETRY_DELAYS[attempt_count - 1]
+            time.sleep(random.uniform(delay * 0.8, delay * 1.2))
     try:
         payload = json.loads(extract_json_object(text))
         payload, normalization_warnings = normalize_visual_payload(payload)
@@ -728,7 +746,21 @@ def call_nvidia_visual_intelligence(
         raise VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON") from exc
     result = VisualIntelligenceResult.model_validate(payload)
     object.__setattr__(result, "_normalization_warnings", normalization_warnings)
+    object.__setattr__(result, "_attempt_count", attempt_count)
+    object.__setattr__(result, "_final_error", None)
     return result
+
+
+def is_transient_nvidia_error(exc: NvidiaProviderError) -> bool:
+    cause = exc.__cause__
+    if isinstance(cause, urllib.error.HTTPError):
+        return cause.code in TRANSIENT_NVIDIA_HTTP_STATUSES
+    if isinstance(cause, TimeoutError | socket.timeout):
+        return True
+    message = str(exc).lower()
+    if "timed out" in message or "timeout" in message:
+        return True
+    return any(f"http {status}" in message for status in TRANSIENT_NVIDIA_HTTP_STATUSES)
 
 
 def normalize_visual_payload(payload: Any) -> tuple[Any, list[str]]:
@@ -1331,6 +1363,9 @@ def apply_failed_visual_intelligence_result(
                 "source_fingerprint": source_fingerprint(asset),
                 "error": sanitize_provider_error(str(exc)),
                 "error_type": "operational_failure",
+                "retryable": is_transient_nvidia_error(exc) if isinstance(exc, NvidiaProviderError) else False,
+                "attempt_count": getattr(exc, "_visual_attempt_count", 1),
+                "final_error": getattr(exc, "_visual_final_error", sanitize_provider_error(str(exc))),
             },
             confidence=None,
         )
@@ -1357,6 +1392,8 @@ def visual_result_json(
         "frame_cache_path": str(inputs.frame_cache_dir),
         "frames": [path.name for path in inputs.frame_paths],
         "normalization_warnings": list(getattr(result, "_normalization_warnings", [])),
+        "attempt_count": getattr(result, "_attempt_count", 1),
+        "final_error": getattr(result, "_final_error", None),
         "visual": result.model_dump(mode="json"),
         "editorial_policy": {
             "status": decision.status if decision else None,
