@@ -1228,18 +1228,18 @@ def build_visual_intelligence_prompt(
         '    "vertical_suitability": 0.0,\n'
         '    "horizontal_suitability": 0.0,\n'
         '    "camera_motion": "unknown",\n'
-        '    "camera_motion_confidence": 0.0,\n'
+        '    "camera_motion_confidence": required_float_0_to_1,\n'
         '    "safe_text_areas": [],\n'
         '    "crop_risk_reasons": []\n'
         "  },\n"
         '  "transforms": {\n'
-        '    "flip": {"allowed": false, "confidence": 0.0, "risk_reasons": []},\n'
-        '    "zoom": {"allowed": false, "max_safe_zoom": 1.0, "confidence": 0.0, "risk_reasons": []},\n'
-        '    "pan": {"allowed": false, "safe_directions": [], "max_offset_x": null, "max_offset_y": null, "confidence": 0.0, "risk_reasons": []},\n'
-        '    "crop_vertical": {"allowed": false, "safe_rect": null, "confidence": 0.0, "preferred_aspect_ratios": ["9:16"], "risk_reasons": []},\n'
-        '    "crop_horizontal": {"allowed": false, "safe_rect": null, "confidence": 0.0, "preferred_aspect_ratios": ["16:9"], "risk_reasons": []}\n'
+        '    "flip": {"allowed": boolean, "confidence": required_float_0_to_1, "risk_reasons": []},\n'
+        '    "zoom": {"allowed": boolean, "max_safe_zoom": float_1_to_3, "confidence": required_float_0_to_1, "risk_reasons": []},\n'
+        '    "pan": {"allowed": boolean, "safe_directions": [], "max_offset_x": null_or_float_0_to_1, "max_offset_y": null_or_float_0_to_1, "confidence": required_float_0_to_1, "risk_reasons": []},\n'
+        '    "crop_vertical": {"allowed": boolean, "safe_rect": null_or_normalized_rect, "confidence": required_float_0_to_1, "preferred_aspect_ratios": ["9:16"], "risk_reasons": []},\n'
+        '    "crop_horizontal": {"allowed": boolean, "safe_rect": null_or_normalized_rect, "confidence": required_float_0_to_1, "preferred_aspect_ratios": ["16:9"], "risk_reasons": []}\n'
         "  },\n"
-        '  "confidence": 0.0,\n'
+        '  "confidence": required_float_0_to_1,\n'
         '  "needs_human_review": false,\n'
         '  "review_reason": null\n'
         "}\n\n"
@@ -1248,12 +1248,16 @@ def build_visual_intelligence_prompt(
         "- garbage.score mide probabilidad de asset inutil: negro, corrupto, borroso extremo o captura accidental.\n"
         "- semantics resume sujeto, accion, entorno, mood, texto visible, logos y keywords buscables.\n"
         "- garbage contiene senales estructuradas de inutilidad editorial; usa confidence global para calibrarlas.\n"
+        "- confidence global es REQUIRED float 0.0..1.0 y debe calibrar la evaluacion visual completa.\n"
         "- composition evalua encuadre, posicion del sujeto, trayectoria opcional, suitability vertical/horizontal, movimiento de camara y zonas seguras de texto.\n"
         "- camera_motion solo puede ser static, pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, handheld, tracking, high_motion o unknown.\n"
+        "- camera_motion_confidence es REQUIRED float 0.0..1.0 y debe estimar evidencia real del movimiento de camara.\n"
         "- flip.allowed=false si hay texto, logos, watermark, UI social, CTAs, direccionalidad clara, manos asimetricas o señales culturales.\n"
         "- zoom.allowed=false si el sujeto ya esta recortado, cerca de bordes, hay texto importante o poca resolucion visual; no recomiendes max_safe_zoom mayor a 1.10.\n"
         "- pan.allowed=true solo cuando hay margen compositivo; safe_directions indica direcciones sin cortar sujeto.\n"
         "- crop_vertical y crop_horizontal son decisiones independientes; no infieras una desde la otra.\n"
+        "- Cada transforms.*.confidence es REQUIRED float 0.0..1.0, estimado independientemente segun evidencia real de los frames/contact-sheet.\n"
+        "- No uses 0.0 como placeholder ni copies valores de ejemplo; 0.0 solo aplica cuando literalmente no existe evidencia util para evaluar ese transform.\n"
         "- subject_region DEBE ser null o [x,y,w,h] con coordenadas numericas normalizadas 0..1; nunca palabras como center, centro, left o right.\n"
         "- subject_trajectory DEBE ser [] o array de objetos {timestamp, center:[x,y], bbox:[x,y,w,h]}; nunca acciones o direcciones como strings.\n"
         "- safe_rect DEBE ser null o [x,y,w,h] con coordenadas numericas normalizadas 0..1.\n"

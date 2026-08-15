@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -1038,6 +1039,66 @@ def test_flip_clean_high_confidence_is_safe(source: Source) -> None:
 
     assert transforms.flip_horizontal.status == "safe"
     assert transforms.flip_horizontal.allowed is True
+
+
+@pytest.mark.parametrize(
+    "transform_key",
+    ["flip", "zoom", "pan", "crop_vertical", "crop_horizontal"],
+)
+def test_transform_confidence_is_required(transform_key: str) -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    del payload["transforms"][transform_key]["confidence"]
+
+    with pytest.raises(ValidationError):
+        VisualIntelligenceResult.model_validate(payload)
+
+
+def test_transform_confidence_zero_is_valid_when_explicit() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["transforms"]["flip"]["confidence"] = 0.0
+
+    result = VisualIntelligenceResult.model_validate(payload)
+
+    assert result.transforms.flip.confidence == 0.0
+
+
+def test_transform_confidence_is_preserved_exactly(source: Source) -> None:
+    result = good_visual_result(flip_allowed=True, flip_risk_reasons=[], flip_confidence=0.83)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "preserve-confidence"))
+
+    assert result.transforms.flip.confidence == 0.83
+    assert transforms.flip_horizontal.confidence == 0.83
+
+
+def test_transform_policy_keeps_existing_confidence_thresholds(source: Source) -> None:
+    clean_high = visual.normalize_visual_transforms(
+        good_visual_result(flip_allowed=True, flip_risk_reasons=[], flip_confidence=0.85),
+        make_asset(source, "clean-high"),
+    )
+    clean_low = visual.normalize_visual_transforms(
+        good_visual_result(flip_allowed=True, flip_risk_reasons=[], flip_confidence=0.40),
+        make_asset(source, "clean-low"),
+    )
+    blocker = visual.normalize_visual_transforms(
+        good_visual_result(visible_text="Oferta", flip_allowed=True, flip_risk_reasons=[], flip_confidence=0.90),
+        make_asset(source, "blocker"),
+    )
+
+    assert clean_high.flip_horizontal.status == "safe"
+    assert clean_high.flip_horizontal.confidence == 0.85
+    assert clean_low.flip_horizontal.status == "unknown"
+    assert clean_low.flip_horizontal.confidence == 0.40
+    assert "low_confidence" in clean_low.flip_horizontal.reasons
+    assert blocker.flip_horizontal.status == "unsafe"
+    assert blocker.flip_horizontal.confidence == 0.90
+
+
+def test_visual_intelligence_prompt_does_not_anchor_transform_confidence(source: Source) -> None:
+    prompt = visual.build_visual_intelligence_prompt(make_asset(source, "prompt-confidence"), [1.0])
+
+    assert '"confidence": 0.0' not in prompt
+    assert "Cada transforms.*.confidence es REQUIRED float 0.0..1.0" in prompt
 
 
 def test_edge_subject_blocks_zoom(

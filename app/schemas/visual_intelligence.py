@@ -108,7 +108,7 @@ class VisualCompositionSignals(BaseModel):
     vertical_suitability: float = Field(ge=0.0, le=1.0)
     horizontal_suitability: float = Field(ge=0.0, le=1.0)
     camera_motion: CameraMotion = "unknown"
-    camera_motion_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    camera_motion_confidence: float = Field(ge=0.0, le=1.0)
     safe_text_areas: list[SafeArea] = Field(default_factory=list)
     crop_risk_reasons: list[str] = Field(default_factory=list)
 
@@ -124,7 +124,7 @@ class VisualFlipDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allowed: bool
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
     risk_reasons: list[str] = Field(default_factory=list)
 
 
@@ -133,7 +133,7 @@ class VisualZoomDecision(BaseModel):
 
     allowed: bool
     max_safe_zoom: float = Field(ge=1.0, le=3.0)
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
     risk_reasons: list[str] = Field(default_factory=list)
 
 
@@ -144,7 +144,7 @@ class VisualPanDecision(BaseModel):
     safe_directions: list[PanDirection] = Field(default_factory=list)
     max_offset_x: float | None = Field(default=None, ge=0.0, le=1.0)
     max_offset_y: float | None = Field(default=None, ge=0.0, le=1.0)
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
     risk_reasons: list[str] = Field(default_factory=list)
 
 
@@ -153,7 +153,7 @@ class VisualCropDecision(BaseModel):
 
     allowed: bool
     safe_rect: list[float] | None = Field(default=None, min_length=4, max_length=4)
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
     preferred_aspect_ratios: list[AspectRatio] = Field(default_factory=list)
     risk_reasons: list[str] = Field(default_factory=list)
 
