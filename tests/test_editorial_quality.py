@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
 import runpy
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import get_settings
 from app.db import Base
 from app.models import Asset, AssetAIAnalysis, Source
 from app.schemas.editorial_quality import QUALITY_PROFILE_VERSION, EditorialQualityVLMResult
@@ -202,6 +203,43 @@ def test_operational_failure_can_retry_to_searchable(
     assert asset.auto_select_enabled is True
 
 
+def test_missing_visual_sample_can_retry_when_pilot_thumbnail_appears(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    asset = make_asset(source, "retry-missing-sample")
+    asset.thumbnail_path = "pilot-previews/28/thumbnail.webp"
+    session.add(asset)
+    session.commit()
+
+    quality.analyze_asset_editorial_quality(
+        session,
+        asset.id,
+        vision_caller=lambda *_args: pytest.fail("VLM should not run without an image"),
+    )
+    failed_analysis = latest_analysis(session, asset)
+    assert asset.editorial_status == "pending"
+    assert "missing visual sample" in failed_analysis.result_json["error"]
+
+    thumbnail = tmp_path / "28" / "thumbnail.webp"
+    thumbnail.parent.mkdir(parents=True)
+    thumbnail.write_bytes(b"webp")
+
+    quality.analyze_asset_editorial_quality(
+        session,
+        asset.id,
+        vision_caller=lambda *_args: EditorialQualityVLMResult.model_validate(good_payload()),
+    )
+
+    assert asset.editorial_status == "searchable"
+    assert asset.quality_profile_version == QUALITY_PROFILE_VERSION
+    assert latest_analysis(session, asset).id != failed_analysis.id
+
+
 def test_operational_failure_can_retry_to_quarantine(
     session: Session,
     source: Source,
@@ -363,9 +401,47 @@ def test_status_counts_pipeline(session: Session, source: Source) -> None:
     assert data["pipeline"]["remaining"] == 1
 
 
-def test_status_counts_failed_editorial_analyses(session: Session, source: Source) -> None:
-    asset = make_asset(source, "failed-analysis")
-    asset.editorial_status = "quarantined"
+def test_status_ignores_historical_failure_after_successful_retry(session: Session, source: Source) -> None:
+    asset = make_asset(source, "failed-then-success")
+    asset.editorial_status = "searchable"
+    asset.quality_profile_version = QUALITY_PROFILE_VERSION
+    session.add(asset)
+    session.flush()
+    session.add_all(
+        [
+            AssetAIAnalysis(
+                asset=asset,
+                model="test-model",
+                provider="nvidia",
+                input_type="editorial_quality",
+                prompt_version=QUALITY_PROFILE_VERSION,
+                result_json={
+                    "decision": "pending",
+                    "error": "missing visual sample",
+                    "error_type": "operational_failure",
+                },
+            ),
+            AssetAIAnalysis(
+                asset=asset,
+                model="test-model",
+                provider="nvidia",
+                input_type="editorial_quality",
+                prompt_version=QUALITY_PROFILE_VERSION,
+                result_json={"decision": "searchable", "error": None},
+            ),
+        ]
+    )
+    session.commit()
+
+    data = quality.editorial_quality_status(session)
+
+    assert data["pipeline"]["failed"] == 0
+    assert data["pipeline"]["processed"] == 1
+
+
+def test_status_counts_current_pending_operational_failure(session: Session, source: Source) -> None:
+    asset = make_asset(source, "current-failure")
+    asset.editorial_status = "pending"
     asset.quality_profile_version = QUALITY_PROFILE_VERSION
     session.add(asset)
     session.flush()
@@ -376,7 +452,11 @@ def test_status_counts_failed_editorial_analyses(session: Session, source: Sourc
             provider="nvidia",
             input_type="editorial_quality",
             prompt_version=QUALITY_PROFILE_VERSION,
-            result_json={"error": "bad json"},
+            result_json={
+                "decision": "pending",
+                "error": "missing visual sample",
+                "error_type": "operational_failure",
+            },
         )
     )
     session.commit()
@@ -384,6 +464,8 @@ def test_status_counts_failed_editorial_analyses(session: Session, source: Sourc
     data = quality.editorial_quality_status(session)
 
     assert data["pipeline"]["failed"] == 1
+    assert data["pipeline"]["processed"] == 0
+    assert data["pipeline"]["remaining"] == 1
 
 
 def test_analysis_provenance_is_stored(session: Session, source: Source, monkeypatch: pytest.MonkeyPatch) -> None:

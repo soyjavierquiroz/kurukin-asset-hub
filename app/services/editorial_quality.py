@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
+import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import json
 from pathlib import Path
-import shutil
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -171,7 +172,7 @@ def run_editorial_quality_backfill(
                 )
             except KeyboardInterrupt:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 session.rollback()
                 failed += 1
                 continue
@@ -205,18 +206,38 @@ def editorial_quality_status(session: Session, *, profile_version: str = QUALITY
     }
     processed = (
         session.scalar(
-            select(func.count()).select_from(Asset).where(Asset.quality_profile_version == profile_version)
+            select(func.count())
+            .select_from(Asset)
+            .where(
+                Asset.quality_profile_version == profile_version,
+                Asset.editorial_status.in_(("searchable", "quarantined", "rejected")),
+            )
         )
         or 0
+    )
+    latest_analysis_ids = (
+        select(func.max(AssetAIAnalysis.id).label("analysis_id"))
+        .where(
+            AssetAIAnalysis.prompt_version == profile_version,
+            AssetAIAnalysis.input_type == EDITORIAL_ANALYSIS_TYPE,
+        )
+        .group_by(AssetAIAnalysis.asset_id)
+        .subquery()
     )
     failed = (
         session.scalar(
             select(func.count())
-            .select_from(AssetAIAnalysis)
+            .select_from(Asset)
+            .join(AssetAIAnalysis, AssetAIAnalysis.asset_id == Asset.id)
+            .join(latest_analysis_ids, latest_analysis_ids.c.analysis_id == AssetAIAnalysis.id)
             .where(
-                AssetAIAnalysis.prompt_version == profile_version,
-                AssetAIAnalysis.input_type == EDITORIAL_ANALYSIS_TYPE,
+                Asset.quality_profile_version == profile_version,
+                Asset.editorial_status == "pending",
                 AssetAIAnalysis.result_json["error"].as_string().is_not(None),
+                or_(
+                    AssetAIAnalysis.result_json["error_type"].as_string() == "operational_failure",
+                    AssetAIAnalysis.result_json["decision"].as_string() == "pending",
+                ),
             )
         )
         or 0

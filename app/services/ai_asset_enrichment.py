@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import unicodedata
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -15,13 +15,15 @@ from app.config import get_settings
 from app.models import Asset, AssetAIAnalysis, AssetKeyword
 from app.schemas.ai_enrichment import AIAssetEnrichmentResult
 from app.services.ai_prompts import ASSET_ENRICHMENT_PROMPT_VERSION, build_asset_enrichment_prompt
+from app.services.ai_providers.nvidia_provider import call_nvidia_vision
 from app.services.ai_providers.openai_provider import (
     DEFAULT_OPENAI_MODEL,
-    call_openai_vision as openai_call_vision,
     sanitize_provider_error,
 )
-from app.services.ai_providers.nvidia_provider import call_nvidia_vision
-from app.services.asset_preview import safe_asset_uid
+from app.services.ai_providers.openai_provider import (
+    call_openai_vision as openai_call_vision,
+)
+from app.services.asset_preview import local_preview_file, safe_asset_uid
 from app.services.people_metadata import (
     gendered_metadata_allowed,
     neutralize_gendered_tags,
@@ -125,7 +127,7 @@ def enrich_pending_assets(session: Session, limit: int = 20, force: bool = False
             enriched.append(enrich_asset_with_ai(session, asset_id, force=force))
         except KeyboardInterrupt:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001
             session.rollback()
             failed_asset = session.get(Asset, asset_id)
             if failed_asset is not None:
@@ -459,19 +461,6 @@ def mark_skipped(session: Session, asset: Asset, reason: str) -> Asset:
     asset.ai_error = None
     session.commit()
     return asset
-
-
-def local_preview_file(relative_path: str | None) -> Path | None:
-    if not relative_path:
-        return None
-    parts = PurePosixPath(relative_path).parts
-    if not parts:
-        return None
-    if parts[0] == "previews":
-        parts = parts[1:]
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        return None
-    return Path(get_settings().preview_storage_dir).joinpath(*parts)
 
 
 def extract_video_frames(preview_path: Path, temp_dir: Path, frame_count: int) -> list[Path]:

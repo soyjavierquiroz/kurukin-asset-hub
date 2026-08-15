@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
+import sys
 from base64 import b64encode
 from collections.abc import Generator
-import json
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -20,9 +20,9 @@ from app.main import create_app
 from app.models import Asset, AssetAIAnalysis, AssetKeyword, Source
 from app.schemas.ai_enrichment import AIAssetEnrichmentResult, build_openai_strict_json_schema
 from app.services import ai_asset_enrichment
+from app.services.ai_asset_enrichment import AssetImageInputs, enrich_asset_with_ai
 from app.services.ai_prompts import build_asset_enrichment_prompt
 from app.services.ai_providers import openai_provider
-from app.services.ai_asset_enrichment import AssetImageInputs, enrich_asset_with_ai
 
 
 def auth_header(username: str = "admin", password: str = "change-me") -> dict[str, str]:
@@ -226,6 +226,52 @@ def test_ai_prompt_keeps_enum_values_exact() -> None:
 
     assert "Mantén los valores enum exactamente como se definen en el schema" in prompt
     assert "aunque estén en inglés" in prompt
+
+
+def test_collect_asset_images_reads_existing_pilot_thumbnail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    client, session_factory = make_test_client()
+    del client
+    thumbnail = tmp_path / "28" / "thumbnail.webp"
+    thumbnail.parent.mkdir(parents=True)
+    thumbnail.write_bytes(b"webp")
+
+    with session_factory() as session:
+        asset = seed_asset(session, uid="pilot-thumb", with_preview=False, asset_type="video")
+        asset.thumbnail_path = "pilot-previews/28/thumbnail.webp"
+        session.commit()
+
+        inputs = ai_asset_enrichment.collect_asset_images(asset)
+
+    assert inputs.image_paths == [thumbnail]
+    assert inputs.input_type == "thumbnail"
+
+
+def test_collect_asset_images_keeps_existing_preview_storage_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PREVIEW_STORAGE_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    client, session_factory = make_test_client()
+    del client
+    thumbnail = tmp_path / "asset_ai_001" / "thumbnail.jpg"
+    thumbnail.parent.mkdir(parents=True)
+    thumbnail.write_bytes(b"jpg")
+
+    with session_factory() as session:
+        asset = seed_asset(session, with_preview=False, asset_type="video")
+        asset.thumbnail_path = "previews/asset_ai_001/thumbnail.jpg"
+        session.commit()
+
+        inputs = ai_asset_enrichment.collect_asset_images(asset)
+
+    assert inputs.image_paths == [thumbnail]
+    assert inputs.input_type == "thumbnail"
 
 
 def test_openai_strict_schema_root_requires_all_properties() -> None:

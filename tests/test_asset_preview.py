@@ -94,6 +94,55 @@ def test_relative_thumbnail_path_for_asset_uses_public_asset_path() -> None:
     assert relative_thumbnail_path_for_asset(123) == "assets/previews/123/thumbnail.jpg"
 
 
+def test_local_preview_file_resolves_pilot_previews(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pilot_root = tmp_path / "pilot"
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(pilot_root))
+    get_settings.cache_clear()
+
+    assert (
+        asset_preview.local_preview_file("pilot-previews/28/thumbnail.webp")
+        == pilot_root / "28" / "thumbnail.webp"
+    )
+
+
+def test_local_preview_file_resolves_legacy_previews(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PREVIEW_STORAGE_DIR", str(tmp_path))
+    get_settings.cache_clear()
+
+    assert (
+        asset_preview.local_preview_file("previews/asset-1/thumbnail.jpg")
+        == tmp_path / "asset-1" / "thumbnail.jpg"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "pilot-previews/../thumbnail.webp",
+        "pilot-previews/28/../thumbnail.webp",
+        "previews/../thumbnail.jpg",
+        "previews/asset-1/../thumbnail.jpg",
+        "../asset-1/thumbnail.jpg",
+    ],
+)
+def test_local_preview_file_rejects_path_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    path: str,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "pilot"))
+    monkeypatch.setenv("PREVIEW_STORAGE_DIR", str(tmp_path / "previews"))
+    get_settings.cache_clear()
+
+    assert asset_preview.local_preview_file(path) is None
+
+
 def test_thumbnail_timestamp_avoids_first_frame() -> None:
     assert thumbnail_timestamp(10) == pytest.approx(3.5)
     assert thumbnail_timestamp(2) == pytest.approx(1.0)

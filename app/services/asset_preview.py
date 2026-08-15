@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import json
-from pathlib import Path
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -373,6 +373,18 @@ def relative_thumbnail_path_for_asset(asset_id: int) -> str:
     return relative_preview_path_for_asset(asset_id, "thumbnail.jpg")
 
 
+def _safe_preview_path(root: Path, parts: list[str]) -> Path | None:
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    root_path = root.resolve(strict=False)
+    candidate = root_path.joinpath(*parts).resolve(strict=False)
+    try:
+        candidate.relative_to(root_path)
+    except ValueError:
+        return None
+    return candidate
+
+
 def local_preview_file(path: str | None) -> Path | None:
     if not path:
         return None
@@ -380,21 +392,20 @@ def local_preview_file(path: str | None) -> Path | None:
     if normalized.startswith("media/"):
         normalized = normalized.removeprefix("media/")
     if normalized.startswith("previews/"):
-        parts = [part for part in normalized.removeprefix("previews/").split("/") if part]
-        if len(parts) != 2 or parts[1] not in PREVIEW_FILENAMES:
-            return None
-        return Path(get_settings().preview_storage_dir).joinpath(*parts)
+        parts = normalized.removeprefix("previews/").split("/")
+        return _safe_preview_path(Path(get_settings().preview_storage_dir), parts)
     if normalized.startswith(f"{PUBLIC_PREVIEW_PREFIX}/"):
-        parts = [part for part in normalized.split("/") if part]
+        parts = normalized.split("/")
         if len(parts) != 4 or parts[-1] not in PREVIEW_FILENAMES:
             return None
-        return Path(get_settings().preview_storage_dir).joinpath(*parts)
+        return _safe_preview_path(Path(get_settings().preview_storage_dir), parts)
     if normalized.startswith("pilot-previews/"):
-        parts = [part for part in normalized.split("/") if part]
-        if len(parts) != 3 or parts[-1] not in {"thumbnail.webp", "preview.webp"}:
-            return None
-        return Path(get_settings().pilot_preview_root).joinpath(*parts[1:])
-    return None
+        parts = normalized.removeprefix("pilot-previews/").split("/")
+        return _safe_preview_path(Path(get_settings().pilot_preview_root), parts)
+    parts = normalized.split("/")
+    if len(parts) != 2 or parts[-1] not in PREVIEW_FILENAMES:
+        return None
+    return _safe_preview_path(Path(get_settings().preview_storage_dir), parts)
 
 
 def preview_public_url(path: str | None) -> str | None:
