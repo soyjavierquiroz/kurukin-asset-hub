@@ -67,6 +67,7 @@ from app.services.long_video_segmentation import (
     segment_long_video_asset,
 )
 from app.services.source_sync import scan_source
+from app.schemas.visual_intelligence import VISUAL_ANALYSIS_TYPE, VISUAL_PROFILE_VERSION
 
 router = APIRouter(tags=["admin"])
 templates = Jinja2Templates(directory="app/templates")
@@ -132,9 +133,13 @@ def bool_filter(value: str | bool | None) -> bool | None:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
-def latest_ai_result(asset: Asset) -> dict[str, object]:
+def latest_analysis_result(asset: Asset, *, visual: bool | None = None) -> dict[str, object]:
     analyses = sorted(
-        asset.ai_analyses,
+        (
+            analysis
+            for analysis in asset.ai_analyses
+            if visual is None or (analysis.input_type == VISUAL_ANALYSIS_TYPE) is visual
+        ),
         key=lambda item: (item.created_at or datetime.min.replace(tzinfo=UTC), item.id or 0),
         reverse=True,
     )
@@ -142,6 +147,18 @@ def latest_ai_result(asset: Asset) -> dict[str, object]:
         return {}
     result = analyses[0].result_json
     return result if isinstance(result, dict) else {}
+
+
+def latest_ai_result(asset: Asset) -> dict[str, object]:
+    return latest_legacy_ai_enrichment(asset)
+
+
+def latest_visual_intelligence_analysis(asset: Asset) -> dict[str, object]:
+    return latest_analysis_result(asset, visual=True)
+
+
+def latest_legacy_ai_enrichment(asset: Asset) -> dict[str, object]:
+    return latest_analysis_result(asset, visual=False)
 
 
 def latest_ai_results(assets: list[Asset]) -> dict[int, dict[str, object]]:
@@ -728,7 +745,9 @@ def assets_detail(request: Request, asset_id: int, _: AdminUser, session: DbSess
             "derived_clips": derived_clips,
             "long_video_threshold_seconds": settings.long_video_threshold_seconds,
             "ai_keywords_by_category": dict(ai_keywords_by_category),
-            "ai_result": latest_ai_result(asset),
+            "ai_result": latest_legacy_ai_enrichment(asset),
+            "visual_intelligence_result": latest_visual_intelligence_analysis(asset),
+            "visual_profile_version": VISUAL_PROFILE_VERSION,
             "preview_public_url": preview_public_url,
         },
     )

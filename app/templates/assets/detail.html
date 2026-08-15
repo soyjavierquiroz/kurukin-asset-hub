@@ -7,6 +7,21 @@
   </div>
 {% endmacro %}
 
+{% macro csv(value) %}
+  {{ value | join(", ") if value else "-" }}
+{% endmacro %}
+
+{% macro transform_status(label, transform, extra="") %}
+  <div class="fact">
+    <dt>{{ label }}</dt>
+    <dd>
+      {{ (transform.get("status") or "unknown") | upper if transform else "UNKNOWN" }}
+      {% if extra %}{{ extra }}{% endif %}
+      {% if transform and transform.get("reasons") %}<br><span>{{ transform.get("reasons") | join(", ") }}</span>{% endif %}
+    </dd>
+  </div>
+{% endmacro %}
+
 {% macro scope_label(asset) %}
   {% if asset.scope == "generic" %}GENÉRICO{% elif asset.scope == "brand" %}MARCA{% elif asset.scope == "title" and asset.title_type == "series" %}SERIE{% elif asset.scope == "title" and asset.title_type == "movie" %}PELÍCULA{% elif asset.scope == "title" %}TÍTULO{% else %}{{ asset.scope }}{% endif %}
 {% endmacro %}
@@ -45,6 +60,14 @@
   {% endif %}
 
   <div class="detail-grid">
+    {% set vi = visual_intelligence_result or {} %}
+    {% set visual = vi.get("visual", {}) %}
+    {% set semantics = visual.get("semantics", {}) %}
+    {% set quality = visual.get("quality", {}) %}
+    {% set garbage = visual.get("garbage", {}) %}
+    {% set composition = visual.get("composition", {}) %}
+    {% set normalized_transforms = vi.get("normalized_transforms", {}) %}
+
     <section class="detail-panel">
       <h2>Preview</h2>
       <div class="preview-large">
@@ -97,7 +120,74 @@
     </section>
 
     <section class="detail-panel">
-      <h2>AI Enrichment</h2>
+      <h2>Editorial / Visual Intelligence</h2>
+      <dl class="facts">
+        {{ fact("Status", vi.get("status")) }}
+        {{ fact("Quality", quality.get("label") ~ " · " ~ ("%.2f"|format(quality.get("score"))) if quality.get("score") is not none else none) }}
+        {{ fact("Vertical suitability", "%.2f"|format(composition.get("vertical_suitability")) if composition.get("vertical_suitability") is not none else none) }}
+        {{ fact("Horizontal suitability", "%.2f"|format(composition.get("horizontal_suitability")) if composition.get("horizontal_suitability") is not none else none) }}
+        {{ fact("Profile version", vi.get("profile_version") or visual_profile_version) }}
+        {{ fact("Model", vi.get("model")) }}
+        {{ fact("Analyzed at", asset.quality_analyzed_at) }}
+      </dl>
+      <h3>Semantics</h3>
+      <dl class="facts">
+        {{ fact("Description", semantics.get("summary_es") or asset.visual_description) }}
+        {{ fact("Subjects", csv(semantics.get("subjects"))) }}
+        {{ fact("Actions", csv(semantics.get("actions"))) }}
+        {{ fact("Objects", csv(semantics.get("objects"))) }}
+        {{ fact("Emotions", csv(semantics.get("emotions"))) }}
+        {{ fact("Themes", csv(semantics.get("narrative_themes"))) }}
+        {{ fact("Setting", semantics.get("setting")) }}
+        {{ fact("Mood", semantics.get("mood")) }}
+        {{ fact("Possible uses", csv(semantics.get("possible_use_cases"))) }}
+        {{ fact("Avoid uses", csv(semantics.get("negative_use_cases"))) }}
+        {{ fact("Keywords", csv(semantics.get("keywords_es"))) }}
+      </dl>
+      <h3>Quality / Garbage</h3>
+      <dl class="facts">
+        {{ fact("Out of frame", garbage.get("subject_severely_out_of_frame")) }}
+        {{ fact("Bad clipping", garbage.get("subject_badly_clipped")) }}
+        {{ fact("Social UI", garbage.get("social_media_ui")) }}
+        {{ fact("Subscribe", garbage.get("subscribe_cta")) }}
+        {{ fact("Emoji", garbage.get("emoji_overlay")) }}
+        {{ fact("Watermark", garbage.get("watermark")) }}
+        {{ fact("Logo", garbage.get("logo")) }}
+        {{ fact("Heavy text", garbage.get("heavy_text_overlay")) }}
+        {{ fact("Nearly empty", garbage.get("nearly_empty")) }}
+        {{ fact("Severe blur", garbage.get("severe_blur")) }}
+        {{ fact("Severe black frames", garbage.get("severe_black_frames")) }}
+      </dl>
+      <h3>Composition</h3>
+      <dl class="facts">
+        {{ fact("Shot type", composition.get("shot_type")) }}
+        {{ fact("Subject position", composition.get("subject_position")) }}
+        {{ fact("Subject framing", composition.get("subject_framing")) }}
+        {{ fact("Negative space", composition.get("negative_space")) }}
+        {{ fact("Edge proximity", composition.get("edge_proximity")) }}
+        {{ fact("Camera motion", composition.get("camera_motion") ~ " · " ~ composition.get("camera_motion_confidence") if composition.get("camera_motion") else none) }}
+        {{ fact("Subject region", composition.get("subject_region")) }}
+        {{ fact("Trajectory", composition.get("subject_trajectory")) }}
+      </dl>
+      <h3>Transforms</h3>
+      <dl class="facts">
+        {{ transform_status("Flip", normalized_transforms.get("flip_horizontal")) }}
+        {{ transform_status("Zoom", normalized_transforms.get("zoom"), " · max " ~ normalized_transforms.get("zoom", {}).get("max_safe_zoom") if normalized_transforms.get("zoom") else "") }}
+        {{ transform_status("Pan", normalized_transforms.get("pan"), " · " ~ (normalized_transforms.get("pan", {}).get("safe_directions") | join(", ")) if normalized_transforms.get("pan") else "") }}
+        {{ transform_status("Crop 9:16", normalized_transforms.get("crop_vertical")) }}
+        {{ transform_status("Crop 16:9", normalized_transforms.get("crop_horizontal")) }}
+      </dl>
+      <h3>Provenance</h3>
+      <dl class="facts">
+        {{ fact("Profile", vi.get("profile_version")) }}
+        {{ fact("Provider", "NVIDIA visual model" if vi.get("model") else none) }}
+        {{ fact("Timestamp", asset.quality_analyzed_at) }}
+        {{ fact("Normalization warnings", csv(vi.get("normalization_warnings"))) }}
+      </dl>
+    </section>
+
+    <section class="detail-panel">
+      <h2>Legacy AI Enrichment</h2>
       <dl class="facts">
         {{ fact("Descripcion", asset.description or ai_result.get("description_es")) }}
         {{ fact("Tema", asset.primary_theme) }}

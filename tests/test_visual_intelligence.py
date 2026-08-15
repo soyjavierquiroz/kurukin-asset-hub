@@ -509,8 +509,21 @@ def test_visual_analysis_persists_structured_json_and_updates_asset(
     assert analysis.result_json["status"] == "ready"
     assert analysis.result_json["frame_count"] == 10
     assert analysis.result_json["visual"]["quality"]["score"] == 0.82
+    assert set(analysis.result_json["visual"]) >= {
+        "quality",
+        "garbage",
+        "semantics",
+        "composition",
+        "transforms",
+        "confidence",
+    }
     assert analysis.result_json["visual"]["composition"]["subject_trajectory"] == []
     assert analysis.result_json["editorial_policy"]["status"] == "searchable"
+    assert analysis.result_json["normalized_transforms"]["flip_horizontal"]["status"] == "unsafe"
+    assert analysis.result_json["normalized_transforms"]["zoom"]["status"] == "safe"
+    assert analysis.result_json["profile_version"] == VISUAL_PROFILE_VERSION
+    assert analysis.result_json["model"] == analysis.model
+    assert analysis.result_json["source_fingerprint"] == visual.source_fingerprint(asset)
     assert asset.quality_score == 0.82
     assert asset.editorial_status == "searchable"
     assert asset.editorial_quality_score == 0.82
@@ -526,6 +539,13 @@ def test_visual_analysis_persists_structured_json_and_updates_asset(
     assert asset.location == "oficina"
     assert asset.best_for == "tutoriales"
     assert asset.avoid_for == "deportes"
+    assert "persona" in (asset.search_text or "")
+    assert "trabajar" in (asset.search_text or "")
+    assert "mesa" in (asset.search_text or "")
+    assert "calma" in (asset.search_text or "")
+    assert "productividad" in (asset.search_text or "")
+    assert "tutoriales" in (asset.search_text or "")
+    assert "deportes" in (asset.search_text or "")
 
 
 def test_visual_caller_receives_single_contact_sheet_image_path(
@@ -827,6 +847,38 @@ def test_transform_policy_blocks_flip_for_text_logo_and_caps_zoom(
     assert asset.max_safe_zoom <= 1.10
 
 
+def test_flip_low_confidence_without_blocker_is_unknown_not_unsafe(source: Source) -> None:
+    result = good_visual_result(flip_allowed=True, flip_risk_reasons=[], flip_confidence=0.48)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "asset-29-concept"))
+
+    flip = transforms.flip_horizontal
+    assert flip.status == "unknown"
+    assert flip.allowed is False
+    assert flip.blockers == []
+    assert "low_confidence" in flip.reasons
+
+
+def test_flip_visible_text_is_unsafe_blocker(source: Source) -> None:
+    result = good_visual_result(visible_text="Oferta", flip_allowed=True, flip_risk_reasons=[], flip_confidence=0.96)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "text-blocker"))
+
+    flip = transforms.flip_horizontal
+    assert flip.status == "unsafe"
+    assert flip.allowed is False
+    assert "visible_text" in flip.blockers
+
+
+def test_flip_clean_high_confidence_is_safe(source: Source) -> None:
+    result = good_visual_result(flip_allowed=True, flip_risk_reasons=[], flip_confidence=0.96)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "clean-flip"))
+
+    assert transforms.flip_horizontal.status == "safe"
+    assert transforms.flip_horizontal.allowed is True
+
+
 def test_edge_subject_blocks_zoom(
     session: Session,
     source: Source,
@@ -848,6 +900,17 @@ def test_edge_subject_blocks_zoom(
     assert asset.max_safe_zoom == 1.0
 
 
+def test_zoom_low_confidence_is_unknown_not_unsafe(source: Source) -> None:
+    result = good_visual_result(zoom_allowed=True, zoom_confidence=0.49)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "zoom-unknown"))
+
+    assert transforms.zoom.status == "unknown"
+    assert transforms.zoom.allowed is False
+    assert transforms.zoom.blockers == []
+    assert "low_confidence" in transforms.zoom.reasons
+
+
 def test_pan_policy_existing_motion_blocks_static_margin_allows(
     session: Session,
     source: Source,
@@ -859,7 +922,20 @@ def test_pan_policy_existing_motion_blocks_static_margin_allows(
     )
 
     assert moving.pan_allowed is False
+    assert moving.pan.status == "unsafe"
     assert static.pan_allowed is True
+    assert static.pan.status == "safe"
+
+
+def test_pan_low_confidence_is_unknown_not_unsafe(source: Source) -> None:
+    result = good_visual_result(pan_confidence=0.51, camera_motion_confidence=0.51)
+
+    transforms = visual.normalize_visual_transforms(result, make_asset(source, "pan-unknown"))
+
+    assert transforms.pan.status == "unknown"
+    assert transforms.pan.allowed is False
+    assert transforms.pan.blockers == []
+    assert "low_confidence" in transforms.pan.reasons
 
 
 def test_crop_vertical_and_horizontal_are_independent(
@@ -871,6 +947,25 @@ def test_crop_vertical_and_horizontal_are_independent(
     assert transforms.crop_vertical_allowed is True
     assert transforms.crop_horizontal_allowed is False
     assert transforms.crop_allowed is True
+
+
+def test_crop_low_confidence_is_unknown_and_known_cut_is_unsafe(source: Source) -> None:
+    unknown = visual.normalize_visual_transforms(
+        good_visual_result(crop_vertical_confidence=0.50),
+        make_asset(source, "crop-unknown"),
+    )
+    unsafe = visual.normalize_visual_transforms(
+        good_visual_result(crop_vertical_risk_reasons=["cuts_subject"]),
+        make_asset(source, "crop-unsafe"),
+    )
+
+    assert unknown.crop_vertical.status == "unknown"
+    assert unknown.crop_vertical.allowed is False
+    assert unknown.crop_vertical.blockers == []
+    assert "low_confidence" in unknown.crop_vertical.reasons
+    assert unsafe.crop_vertical.status == "unsafe"
+    assert unsafe.crop_vertical.allowed is False
+    assert "cuts_subject" in unsafe.crop_vertical.blockers
 
 
 def test_visual_status_failed_is_current(
@@ -1265,9 +1360,20 @@ def good_visual_result(
     edge_proximity: float = 0.2,
     negative_space: float = 0.35,
     camera_motion: str = "static",
+    camera_motion_confidence: float = 0.9,
     quality_reason_codes: list[str] | None = None,
+    flip_allowed: bool = False,
+    flip_confidence: float = 0.9,
+    flip_risk_reasons: list[str] | None = None,
+    zoom_allowed: bool = True,
+    zoom_confidence: float = 0.9,
+    pan_confidence: float = 0.9,
     crop_vertical_allowed: bool = True,
     crop_horizontal_allowed: bool = True,
+    crop_vertical_confidence: float = 0.9,
+    crop_horizontal_confidence: float = 0.9,
+    crop_vertical_risk_reasons: list[str] | None = None,
+    crop_horizontal_risk_reasons: list[str] | None = None,
 ) -> VisualIntelligenceResult:
     return VisualIntelligenceResult.model_validate(
         {
@@ -1328,34 +1434,43 @@ def good_visual_result(
                 "vertical_suitability": 0.9,
                 "horizontal_suitability": 0.55,
                 "camera_motion": camera_motion,
-                "camera_motion_confidence": 0.9,
+                "camera_motion_confidence": camera_motion_confidence,
                 "safe_text_areas": ["top"],
                 "crop_risk_reasons": [],
             },
             "transforms": {
-                "flip": {"allowed": False, "confidence": 0.9, "risk_reasons": ["handedness"]},
-                "zoom": {"allowed": True, "max_safe_zoom": max_safe_zoom, "confidence": 0.9, "risk_reasons": []},
+                "flip": {
+                    "allowed": flip_allowed,
+                    "confidence": flip_confidence,
+                    "risk_reasons": ["handedness"] if flip_risk_reasons is None else flip_risk_reasons,
+                },
+                "zoom": {
+                    "allowed": zoom_allowed,
+                    "max_safe_zoom": max_safe_zoom,
+                    "confidence": zoom_confidence,
+                    "risk_reasons": [],
+                },
                 "pan": {
                     "allowed": True,
                     "safe_directions": ["left", "right"],
                     "max_offset_x": 0.08,
                     "max_offset_y": 0.05,
-                    "confidence": 0.9,
+                    "confidence": pan_confidence,
                     "risk_reasons": [],
                 },
                 "crop_vertical": {
                     "allowed": crop_vertical_allowed,
                     "safe_rect": [0.15, 0.0, 0.7, 1.0],
-                    "confidence": 0.9,
+                    "confidence": crop_vertical_confidence,
                     "preferred_aspect_ratios": ["9:16"],
-                    "risk_reasons": [],
+                    "risk_reasons": crop_vertical_risk_reasons or [],
                 },
                 "crop_horizontal": {
                     "allowed": crop_horizontal_allowed,
                     "safe_rect": [0.0, 0.2, 1.0, 0.6],
-                    "confidence": 0.9,
+                    "confidence": crop_horizontal_confidence,
                     "preferred_aspect_ratios": ["16:9"],
-                    "risk_reasons": [],
+                    "risk_reasons": crop_horizontal_risk_reasons or [],
                 },
             },
             "confidence": 0.88,

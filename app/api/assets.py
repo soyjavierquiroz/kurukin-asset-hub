@@ -478,6 +478,12 @@ def serialize_asset(asset: Asset, score: float | None = None) -> dict[str, Any]:
         "duration": asset.duration_seconds,
         "can_flip_horizontal": asset.flip_horizontal_allowed,
         "can_zoom": asset.zoom_allowed,
+        "visual_description": asset.visual_description,
+        "editorial_quality_score": asset.editorial_quality_score,
+        "vertical_suitability_score": asset.vertical_suitability_score,
+        "horizontal_suitability_score": asset.horizontal_suitability_score,
+        "camera_motion": asset.camera_motion,
+        "subject_position": asset.subject_position,
         "generic_compatibility": asset.generic_compatibility,
         "preview_url": preview_public_url(asset.preview_path),
         "drive_location": {

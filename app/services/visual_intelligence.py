@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -91,19 +91,83 @@ class VisualEditorialDecision:
 
 
 @dataclass(frozen=True)
-class NormalizedVisualTransforms:
-    flip_allowed: bool
-    flip_risk_reasons: list[str]
-    zoom_allowed: bool
+class NormalizedTransformDecision:
+    status: str
+    allowed: bool
+    confidence: float
+    blockers: list[str]
+    reasons: list[str]
+
+
+@dataclass(frozen=True)
+class NormalizedZoomDecision(NormalizedTransformDecision):
     max_safe_zoom: float
-    pan_allowed: bool
-    pan_safe_directions: list[str]
-    pan_max_offset_x: float | None
-    pan_max_offset_y: float | None
-    crop_vertical_allowed: bool
-    crop_horizontal_allowed: bool
-    crop_allowed: bool
+
+
+@dataclass(frozen=True)
+class NormalizedPanDecision(NormalizedTransformDecision):
+    safe_directions: list[str]
+    max_offset_x: float | None
+    max_offset_y: float | None
+
+
+@dataclass(frozen=True)
+class NormalizedCropDecision(NormalizedTransformDecision):
+    safe_rect: list[float] | None
+
+
+@dataclass(frozen=True)
+class NormalizedVisualTransforms:
+    flip_horizontal: NormalizedTransformDecision
+    zoom: NormalizedZoomDecision
+    pan: NormalizedPanDecision
+    crop_vertical: NormalizedCropDecision
+    crop_horizontal: NormalizedCropDecision
     safe_text_areas: list[str]
+
+    @property
+    def flip_allowed(self) -> bool:
+        return self.flip_horizontal.allowed
+
+    @property
+    def flip_risk_reasons(self) -> list[str]:
+        return self.flip_horizontal.reasons
+
+    @property
+    def zoom_allowed(self) -> bool:
+        return self.zoom.allowed
+
+    @property
+    def max_safe_zoom(self) -> float:
+        return self.zoom.max_safe_zoom
+
+    @property
+    def pan_allowed(self) -> bool:
+        return self.pan.allowed
+
+    @property
+    def pan_safe_directions(self) -> list[str]:
+        return self.pan.safe_directions
+
+    @property
+    def pan_max_offset_x(self) -> float | None:
+        return self.pan.max_offset_x
+
+    @property
+    def pan_max_offset_y(self) -> float | None:
+        return self.pan.max_offset_y
+
+    @property
+    def crop_vertical_allowed(self) -> bool:
+        return self.crop_vertical.allowed
+
+    @property
+    def crop_horizontal_allowed(self) -> bool:
+        return self.crop_horizontal.allowed
+
+    @property
+    def crop_allowed(self) -> bool:
+        return self.crop_vertical.allowed or self.crop_horizontal.allowed
 
 
 def analyze_asset_visual_intelligence(
@@ -796,8 +860,6 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
     garbage = result.garbage
     semantics = result.semantics
     composition = result.composition
-    flip_allowed = result.transforms.flip.allowed
-    flip_reasons = list(result.transforms.flip.risk_reasons)
     flip_blockers: list[str] = []
     if semantics.visible_text:
         flip_blockers.append("visible_text")
@@ -811,68 +873,174 @@ def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) 
         flip_blockers.append("subscribe_cta")
     if has_directional_signal(result):
         flip_blockers.append("directionality")
-    if result.transforms.flip.confidence < LOW_CONFIDENCE_THRESHOLD:
-        flip_blockers.append("low_confidence")
-    if flip_blockers:
-        flip_allowed = False
-        flip_reasons = dedupe_codes([*flip_reasons, *flip_blockers])
+    if has_lateral_semantic_risk(result.transforms.flip.risk_reasons):
+        flip_blockers.append("lateral_semantic_meaning")
+    flip_decision = normalized_basic_decision(
+        requested_allowed=result.transforms.flip.allowed,
+        confidence=result.transforms.flip.confidence,
+        blockers=flip_blockers,
+        reasons=result.transforms.flip.risk_reasons,
+    )
 
     max_safe_zoom = min(float(result.transforms.zoom.max_safe_zoom), MAX_VISUAL_V1_ZOOM)
-    zoom_allowed = result.transforms.zoom.allowed and max_safe_zoom > 1.0
+    zoom_blockers: list[str] = []
     zoom_reasons = list(result.transforms.zoom.risk_reasons)
     if composition.edge_proximity >= 0.80 or garbage.subject_badly_clipped:
         max_safe_zoom = 1.0
-        zoom_allowed = False
-        zoom_reasons.append("edge_or_clipped_subject")
+        if garbage.subject_badly_clipped:
+            zoom_blockers.append("subject_badly_clipped")
+        if composition.edge_proximity >= 0.80:
+            zoom_blockers.append("subject_dangerously_near_edge")
     elif composition.edge_proximity >= 0.65:
         max_safe_zoom = min(max_safe_zoom, 1.03)
-        zoom_allowed = zoom_allowed and max_safe_zoom > 1.0
         zoom_reasons.append("edge_subject")
-    if result.transforms.zoom.confidence < LOW_CONFIDENCE_THRESHOLD:
-        zoom_allowed = False
+    smallest_side = min(asset.width or 0, asset.height or 0)
+    if smallest_side and smallest_side < 480:
         max_safe_zoom = 1.0
-        zoom_reasons.append("low_confidence")
-    if min(asset.width or 0, asset.height or 0) and min(asset.width or 0, asset.height or 0) < 720:
+        zoom_blockers.append("insufficient_resolution")
+    elif smallest_side and smallest_side < 720:
         max_safe_zoom = min(max_safe_zoom, 1.03)
+    zoom_decision_base = normalized_basic_decision(
+        requested_allowed=result.transforms.zoom.allowed and max_safe_zoom > 1.0,
+        confidence=result.transforms.zoom.confidence,
+        blockers=zoom_blockers,
+        reasons=zoom_reasons,
+    )
+    zoom_decision = NormalizedZoomDecision(
+        status=zoom_decision_base.status,
+        allowed=zoom_decision_base.allowed,
+        confidence=zoom_decision_base.confidence,
+        blockers=zoom_decision_base.blockers,
+        reasons=zoom_decision_base.reasons,
+        max_safe_zoom=round(max(1.0, min(max_safe_zoom if zoom_decision_base.allowed else 1.0, MAX_VISUAL_V1_ZOOM)), 3),
+    )
 
-    pan_allowed = result.transforms.pan.allowed
+    pan_blockers: list[str] = []
     pan_reasons = list(result.transforms.pan.risk_reasons)
     if composition.camera_motion not in {"static", "unknown"}:
-        pan_allowed = False
-        pan_reasons.append("existing_camera_motion")
+        pan_blockers.append("existing_camera_motion")
     if high_subject_trajectory_motion(result):
-        pan_allowed = False
-        pan_reasons.append("high_subject_motion")
+        pan_blockers.append("high_subject_motion")
     if composition.negative_space < 0.20 or composition.edge_proximity > 0.55:
-        pan_allowed = False
-        pan_reasons.append("insufficient_composition_margin")
-    if result.transforms.pan.confidence < LOW_CONFIDENCE_THRESHOLD:
-        pan_allowed = False
-        pan_reasons.append("low_confidence")
-    pan_max_offset_x = min_optional(result.transforms.pan.max_offset_x, 0.08) if pan_allowed else 0.0
-    pan_max_offset_y = min_optional(result.transforms.pan.max_offset_y, 0.08) if pan_allowed else 0.0
+        pan_blockers.append("insufficient_composition_margin")
+    if composition.camera_motion == "unknown" or composition.camera_motion_confidence < LOW_CONFIDENCE_THRESHOLD:
+        pan_reasons.append("geometry_or_trajectory_unavailable")
+    pan_decision_base = normalized_basic_decision(
+        requested_allowed=result.transforms.pan.allowed,
+        confidence=min(result.transforms.pan.confidence, composition.camera_motion_confidence),
+        blockers=pan_blockers,
+        reasons=pan_reasons,
+    )
+    pan_max_offset_x = min_optional(result.transforms.pan.max_offset_x, 0.08) if pan_decision_base.allowed else 0.0
+    pan_max_offset_y = min_optional(result.transforms.pan.max_offset_y, 0.08) if pan_decision_base.allowed else 0.0
+    pan_decision = NormalizedPanDecision(
+        status=pan_decision_base.status,
+        allowed=pan_decision_base.allowed,
+        confidence=pan_decision_base.confidence,
+        blockers=pan_decision_base.blockers,
+        reasons=pan_decision_base.reasons,
+        safe_directions=result.transforms.pan.safe_directions if pan_decision_base.allowed else [],
+        max_offset_x=pan_max_offset_x,
+        max_offset_y=pan_max_offset_y,
+    )
 
-    crop_vertical_allowed = result.transforms.crop_vertical.allowed
-    crop_horizontal_allowed = result.transforms.crop_horizontal.allowed
-    if result.transforms.crop_vertical.confidence < LOW_CONFIDENCE_THRESHOLD:
-        crop_vertical_allowed = False
-    if result.transforms.crop_horizontal.confidence < LOW_CONFIDENCE_THRESHOLD:
-        crop_horizontal_allowed = False
+    crop_vertical_decision = normalized_crop_decision(
+        allowed=result.transforms.crop_vertical.allowed,
+        safe_rect=result.transforms.crop_vertical.safe_rect,
+        confidence=result.transforms.crop_vertical.confidence,
+        reasons=[*result.transforms.crop_vertical.risk_reasons, *composition.crop_risk_reasons],
+    )
+    crop_horizontal_decision = normalized_crop_decision(
+        allowed=result.transforms.crop_horizontal.allowed,
+        safe_rect=result.transforms.crop_horizontal.safe_rect,
+        confidence=result.transforms.crop_horizontal.confidence,
+        reasons=[*result.transforms.crop_horizontal.risk_reasons, *composition.crop_risk_reasons],
+    )
 
     return NormalizedVisualTransforms(
-        flip_allowed=flip_allowed,
-        flip_risk_reasons=dedupe_codes(flip_reasons),
-        zoom_allowed=zoom_allowed,
-        max_safe_zoom=round(max(1.0, min(max_safe_zoom, MAX_VISUAL_V1_ZOOM)), 3),
-        pan_allowed=pan_allowed,
-        pan_safe_directions=result.transforms.pan.safe_directions if pan_allowed else [],
-        pan_max_offset_x=pan_max_offset_x,
-        pan_max_offset_y=pan_max_offset_y,
-        crop_vertical_allowed=crop_vertical_allowed,
-        crop_horizontal_allowed=crop_horizontal_allowed,
-        crop_allowed=crop_vertical_allowed or crop_horizontal_allowed,
+        flip_horizontal=flip_decision,
+        zoom=zoom_decision,
+        pan=pan_decision,
+        crop_vertical=crop_vertical_decision,
+        crop_horizontal=crop_horizontal_decision,
         safe_text_areas=composition.safe_text_areas,
     )
+
+
+def normalized_basic_decision(
+    *,
+    requested_allowed: bool,
+    confidence: float,
+    blockers: list[str],
+    reasons: list[str],
+) -> NormalizedTransformDecision:
+    clean_blockers = dedupe_codes(blockers)
+    clean_reasons = dedupe_codes([*reasons, *clean_blockers])
+    if confidence < LOW_CONFIDENCE_THRESHOLD:
+        clean_reasons = dedupe_codes([*clean_reasons, "low_confidence"])
+    if clean_blockers:
+        return NormalizedTransformDecision(
+            status="unsafe",
+            allowed=False,
+            confidence=round(confidence, 3),
+            blockers=clean_blockers,
+            reasons=clean_reasons,
+        )
+    if confidence < LOW_CONFIDENCE_THRESHOLD or not requested_allowed:
+        return NormalizedTransformDecision(
+            status="unknown",
+            allowed=False,
+            confidence=round(confidence, 3),
+            blockers=[],
+            reasons=clean_reasons or ["insufficient_evidence"],
+        )
+    return NormalizedTransformDecision(
+        status="safe",
+        allowed=True,
+        confidence=round(confidence, 3),
+        blockers=[],
+        reasons=clean_reasons,
+    )
+
+
+def normalized_crop_decision(
+    *,
+    allowed: bool,
+    safe_rect: list[float] | None,
+    confidence: float,
+    reasons: list[str],
+) -> NormalizedCropDecision:
+    crop_blockers = [reason for reason in reasons if reason in {"cuts_subject", "cuts_text", "cuts_logo", "bad_crop"}]
+    crop_reasons = list(reasons)
+    if allowed and safe_rect is None:
+        crop_reasons.append("geometry_unavailable")
+    base = normalized_basic_decision(
+        requested_allowed=allowed and safe_rect is not None,
+        confidence=confidence,
+        blockers=crop_blockers,
+        reasons=crop_reasons,
+    )
+    return NormalizedCropDecision(
+        status=base.status,
+        allowed=base.allowed,
+        confidence=base.confidence,
+        blockers=base.blockers,
+        reasons=base.reasons,
+        safe_rect=safe_rect if base.allowed else None,
+    )
+
+
+def has_lateral_semantic_risk(reasons: list[str]) -> bool:
+    lateral_reasons = {
+        "handedness",
+        "hands_asymmetric",
+        "lateral_semantic_meaning",
+        "directionality",
+        "signage",
+        "arrows",
+        "numbers",
+    }
+    return any(dedupe_codes([reason])[0] in lateral_reasons for reason in reasons if dedupe_codes([reason]))
 
 
 def has_directional_signal(result: VisualIntelligenceResult) -> bool:
@@ -1129,6 +1297,7 @@ def apply_visual_intelligence_result(
             *result.semantics.emotions,
             *result.semantics.narrative_themes,
             *result.semantics.possible_use_cases,
+            *result.semantics.negative_use_cases,
             *result.semantics.keywords_es,
         ]
     ).strip() or asset.search_text
@@ -1195,7 +1364,7 @@ def visual_result_json(
             "status": decision.status if decision else None,
             "reason_codes": decision.reason_codes if decision else [],
         },
-        "normalized_transforms": transforms.__dict__ if transforms else None,
+        "normalized_transforms": asdict(transforms) if transforms else None,
         "error": None,
     }
 
