@@ -27,6 +27,21 @@ from app.services.rclone_service import RcloneService
 
 VISUAL_TEMP_ROOT = Path("/tmp/kurukin-asset-hub-visual-intelligence")
 VISUAL_TERMINAL_STATUSES = ("ready", "failed")
+HIGH_CONFIDENCE_THRESHOLD = 0.75
+LOW_CONFIDENCE_THRESHOLD = 0.60
+MIN_CACHED_VISUAL_FRAMES = 8
+MAX_VISUAL_V1_ZOOM = 1.10
+HARD_REJECT_FLAGS = (
+    "subject_severely_out_of_frame",
+    "subject_badly_clipped",
+    "social_media_ui",
+    "subscribe_cta",
+    "emoji_overlay",
+    "nearly_empty",
+    "severe_blur",
+    "severe_black_frames",
+)
+QUARANTINE_FLAGS = ("watermark", "heavy_text_overlay")
 
 
 class VisualIntelligenceOperationalError(RuntimeError):
@@ -58,6 +73,28 @@ class VisualBackfillResult:
 
 
 VisualCaller = Callable[[str, list[Path]], VisualIntelligenceResult]
+
+
+@dataclass(frozen=True)
+class VisualEditorialDecision:
+    status: str
+    reason_codes: list[str]
+
+
+@dataclass(frozen=True)
+class NormalizedVisualTransforms:
+    flip_allowed: bool
+    flip_risk_reasons: list[str]
+    zoom_allowed: bool
+    max_safe_zoom: float
+    pan_allowed: bool
+    pan_safe_directions: list[str]
+    pan_max_offset_x: float | None
+    pan_max_offset_y: float | None
+    crop_vertical_allowed: bool
+    crop_horizontal_allowed: bool
+    crop_allowed: bool
+    safe_text_areas: list[str]
 
 
 def analyze_asset_visual_intelligence(
@@ -356,32 +393,101 @@ def visual_status_from_asset(asset: Asset, profile_version: str) -> str | None:
 def collect_visual_frames(asset: Asset, profile_version: str = VISUAL_PROFILE_VERSION) -> VisualFrameInputs:
     temp_dir = VISUAL_TEMP_ROOT / "masters" / str(asset.id)
     shutil.rmtree(temp_dir, ignore_errors=True)
-    temp_dir.mkdir(parents=True, exist_ok=True)
     master_path = temp_dir / safe_asset_uid(asset.filename or f"asset-{asset.id}.mp4")
+    frame_cache_dir = visual_frame_cache_dir(asset.id, profile_version)
+    fingerprint = source_fingerprint(asset)
+    cached_frames = read_cached_visual_frames(frame_cache_dir, profile_version, fingerprint)
+    if len(cached_frames) >= MIN_CACHED_VISUAL_FRAMES:
+        return VisualFrameInputs(
+            master_path=master_path,
+            frame_paths=cached_frames,
+            frame_cache_dir=frame_cache_dir,
+            temp_dir=temp_dir,
+        )
+
+    temp_dir.mkdir(parents=True, exist_ok=True)
     remote = asset.rclone_remote or (asset.source.rclone_remote if asset.source else None) or get_settings().rclone_remote
     remote_path = asset.remote_path or asset.source_path
     if not remote or not remote_path:
         raise VisualIntelligenceOperationalError("asset master remote path is missing")
-    RcloneService().copyto(remote, remote_path, str(master_path))
-    if not master_path.is_file() or master_path.stat().st_size <= 0:
-        raise VisualIntelligenceOperationalError("asset master download failed")
+    try:
+        RcloneService().copyto(remote, remote_path, str(master_path))
+        if not master_path.is_file() or master_path.stat().st_size <= 0:
+            raise VisualIntelligenceOperationalError("asset master download failed")
 
-    frame_cache_dir = visual_frame_cache_dir(asset.id, profile_version)
-    shutil.rmtree(frame_cache_dir, ignore_errors=True)
-    frame_cache_dir.mkdir(parents=True, exist_ok=True)
-    frames = extract_temporal_frames(master_path, frame_cache_dir, asset.duration_seconds, VISUAL_FRAME_COUNT)
-    if len(frames) < 8:
-        raise VisualIntelligenceOperationalError("visual intelligence requires at least 8 temporal frames")
-    return VisualFrameInputs(
-        master_path=master_path,
-        frame_paths=frames,
-        frame_cache_dir=frame_cache_dir,
-        temp_dir=temp_dir,
-    )
+        shutil.rmtree(frame_cache_dir, ignore_errors=True)
+        frame_cache_dir.mkdir(parents=True, exist_ok=True)
+        frames = extract_temporal_frames(master_path, frame_cache_dir, asset.duration_seconds, VISUAL_FRAME_COUNT)
+        if len(frames) < MIN_CACHED_VISUAL_FRAMES:
+            raise VisualIntelligenceOperationalError("visual intelligence requires at least 8 temporal frames")
+        write_visual_frame_manifest(frame_cache_dir, profile_version, fingerprint, asset.duration_seconds, frames)
+        return VisualFrameInputs(
+            master_path=master_path,
+            frame_paths=frames,
+            frame_cache_dir=frame_cache_dir,
+            temp_dir=temp_dir,
+        )
+    finally:
+        master_path.unlink(missing_ok=True)
 
 
 def visual_frame_cache_dir(asset_id: int, profile_version: str = VISUAL_PROFILE_VERSION) -> Path:
     return Path(get_settings().pilot_preview_root) / str(asset_id) / f"{profile_version}-frames"
+
+
+def read_cached_visual_frames(frame_cache_dir: Path, profile_version: str, fingerprint: str) -> list[Path]:
+    manifest_path = frame_cache_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if manifest.get("profile_version") != profile_version or manifest.get("source_fingerprint") != fingerprint:
+        return []
+    frames: list[Path] = []
+    for item in manifest.get("frames") or []:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("file")
+        if not isinstance(filename, str) or "/" in filename or "\\" in filename:
+            continue
+        frame_path = frame_cache_dir / filename
+        if frame_path.is_file() and frame_path.stat().st_size > 0:
+            frames.append(frame_path)
+    return frames
+
+
+def write_visual_frame_manifest(
+    frame_cache_dir: Path,
+    profile_version: str,
+    fingerprint: str,
+    duration_seconds: float | None,
+    frames: list[Path],
+) -> None:
+    frame_count = len(frames)
+    duration = duration_seconds if duration_seconds and duration_seconds > 0 else None
+    manifest = {
+        "profile_version": profile_version,
+        "source_fingerprint": fingerprint,
+        "duration_seconds": duration,
+        "frames": [
+            {
+                "file": path.name,
+                "timestamp": estimated_frame_timestamp(index, frame_count, duration),
+            }
+            for index, path in enumerate(frames, start=1)
+        ],
+    }
+    (frame_cache_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def estimated_frame_timestamp(index: int, frame_count: int, duration_seconds: float | None) -> float | None:
+    if not duration_seconds or duration_seconds <= 0 or frame_count <= 0:
+        return None
+    ratio = index / (frame_count + 1)
+    return round(max(0.0, min(duration_seconds * ratio, duration_seconds - 0.05)), 3)
 
 
 def extract_temporal_frames(
@@ -449,6 +555,192 @@ def call_nvidia_visual_intelligence(
     return VisualIntelligenceResult.model_validate(payload)
 
 
+def decide_visual_editorial_status(result: VisualIntelligenceResult) -> VisualEditorialDecision:
+    garbage = result.garbage
+    reason_codes: list[str] = []
+    hard_flags = [flag for flag in HARD_REJECT_FLAGS if getattr(garbage, flag)]
+    quarantine_flags = [flag for flag in QUARANTINE_FLAGS if getattr(garbage, flag)]
+
+    if hard_flags and result.confidence >= HIGH_CONFIDENCE_THRESHOLD:
+        return VisualEditorialDecision("rejected", dedupe_codes(hard_flags))
+    if not garbage.editorial_usable and result.confidence >= HIGH_CONFIDENCE_THRESHOLD and garbage.score >= 0.75:
+        return VisualEditorialDecision("rejected", ["not_editorial_usable"])
+
+    reason_codes.extend(hard_flags)
+    reason_codes.extend(quarantine_flags)
+    if result.confidence < LOW_CONFIDENCE_THRESHOLD:
+        reason_codes.append("low_confidence")
+    if result.quality.score < 0.55 or result.quality.label in {"weak", "bad"}:
+        reason_codes.append("low_editorial_quality")
+    if garbage.is_garbage or garbage.score >= 0.55:
+        reason_codes.append("garbage_risk")
+    if not garbage.editorial_usable:
+        reason_codes.append("not_editorial_usable")
+    if result.needs_human_review:
+        reason_codes.append("needs_human_review")
+    if reason_codes:
+        return VisualEditorialDecision("quarantined", dedupe_codes(reason_codes))
+    return VisualEditorialDecision("searchable", [])
+
+
+def normalize_visual_transforms(result: VisualIntelligenceResult, asset: Asset) -> NormalizedVisualTransforms:
+    garbage = result.garbage
+    semantics = result.semantics
+    composition = result.composition
+    flip_allowed = result.transforms.flip.allowed
+    flip_reasons = list(result.transforms.flip.risk_reasons)
+    flip_blockers: list[str] = []
+    if semantics.visible_text:
+        flip_blockers.append("visible_text")
+    if garbage.logo or semantics.logo_or_watermark:
+        flip_blockers.append("logo")
+    if garbage.watermark or semantics.logo_or_watermark:
+        flip_blockers.append("watermark")
+    if garbage.social_media_ui:
+        flip_blockers.append("social_media_ui")
+    if garbage.subscribe_cta:
+        flip_blockers.append("subscribe_cta")
+    if has_directional_signal(result):
+        flip_blockers.append("directionality")
+    if result.transforms.flip.confidence < LOW_CONFIDENCE_THRESHOLD:
+        flip_blockers.append("low_confidence")
+    if flip_blockers:
+        flip_allowed = False
+        flip_reasons = dedupe_codes([*flip_reasons, *flip_blockers])
+
+    max_safe_zoom = min(float(result.transforms.zoom.max_safe_zoom), MAX_VISUAL_V1_ZOOM)
+    zoom_allowed = result.transforms.zoom.allowed and max_safe_zoom > 1.0
+    zoom_reasons = list(result.transforms.zoom.risk_reasons)
+    if composition.edge_proximity >= 0.80 or garbage.subject_badly_clipped:
+        max_safe_zoom = 1.0
+        zoom_allowed = False
+        zoom_reasons.append("edge_or_clipped_subject")
+    elif composition.edge_proximity >= 0.65:
+        max_safe_zoom = min(max_safe_zoom, 1.03)
+        zoom_allowed = zoom_allowed and max_safe_zoom > 1.0
+        zoom_reasons.append("edge_subject")
+    if result.transforms.zoom.confidence < LOW_CONFIDENCE_THRESHOLD:
+        zoom_allowed = False
+        max_safe_zoom = 1.0
+        zoom_reasons.append("low_confidence")
+    if min(asset.width or 0, asset.height or 0) and min(asset.width or 0, asset.height or 0) < 720:
+        max_safe_zoom = min(max_safe_zoom, 1.03)
+
+    pan_allowed = result.transforms.pan.allowed
+    pan_reasons = list(result.transforms.pan.risk_reasons)
+    if composition.camera_motion not in {"static", "unknown"}:
+        pan_allowed = False
+        pan_reasons.append("existing_camera_motion")
+    if high_subject_trajectory_motion(result):
+        pan_allowed = False
+        pan_reasons.append("high_subject_motion")
+    if composition.negative_space < 0.20 or composition.edge_proximity > 0.55:
+        pan_allowed = False
+        pan_reasons.append("insufficient_composition_margin")
+    if result.transforms.pan.confidence < LOW_CONFIDENCE_THRESHOLD:
+        pan_allowed = False
+        pan_reasons.append("low_confidence")
+    pan_max_offset_x = min_optional(result.transforms.pan.max_offset_x, 0.08) if pan_allowed else 0.0
+    pan_max_offset_y = min_optional(result.transforms.pan.max_offset_y, 0.08) if pan_allowed else 0.0
+
+    crop_vertical_allowed = result.transforms.crop_vertical.allowed
+    crop_horizontal_allowed = result.transforms.crop_horizontal.allowed
+    if result.transforms.crop_vertical.confidence < LOW_CONFIDENCE_THRESHOLD:
+        crop_vertical_allowed = False
+    if result.transforms.crop_horizontal.confidence < LOW_CONFIDENCE_THRESHOLD:
+        crop_horizontal_allowed = False
+
+    return NormalizedVisualTransforms(
+        flip_allowed=flip_allowed,
+        flip_risk_reasons=dedupe_codes(flip_reasons),
+        zoom_allowed=zoom_allowed,
+        max_safe_zoom=round(max(1.0, min(max_safe_zoom, MAX_VISUAL_V1_ZOOM)), 3),
+        pan_allowed=pan_allowed,
+        pan_safe_directions=result.transforms.pan.safe_directions if pan_allowed else [],
+        pan_max_offset_x=pan_max_offset_x,
+        pan_max_offset_y=pan_max_offset_y,
+        crop_vertical_allowed=crop_vertical_allowed,
+        crop_horizontal_allowed=crop_horizontal_allowed,
+        crop_allowed=crop_vertical_allowed or crop_horizontal_allowed,
+        safe_text_areas=composition.safe_text_areas,
+    )
+
+
+def has_directional_signal(result: VisualIntelligenceResult) -> bool:
+    directional_terms = ("flecha", "direccion", "señal", "senal", "cartel", "izquierda", "derecha")
+    searchable = " ".join(
+        [
+            *result.semantics.subjects,
+            *result.semantics.actions,
+            *result.semantics.objects,
+            *result.semantics.keywords_es,
+            result.semantics.visible_text or "",
+        ]
+    ).lower()
+    return any(term in searchable for term in directional_terms)
+
+
+def high_subject_trajectory_motion(result: VisualIntelligenceResult) -> bool:
+    points = result.composition.subject_trajectory
+    if len(points) < 2:
+        return False
+    first = points[0].center
+    last = points[-1].center
+    return abs(last[0] - first[0]) + abs(last[1] - first[1]) > 0.35
+
+
+def min_optional(value: float | None, cap: float) -> float:
+    if value is None:
+        return cap
+    return round(max(0.0, min(float(value), cap)), 3)
+
+
+def dedupe_codes(values: list[str]) -> list[str]:
+    codes: list[str] = []
+    for value in values:
+        code = str(value or "").strip().lower().replace(" ", "_")
+        if code and code not in codes:
+            codes.append(code[:80])
+    return codes
+
+
+def normalize_camera_motion(value: str | None) -> str:
+    mapping = {
+        "static": "static",
+        "handheld": "handheld",
+        "tracking": "tracking",
+        "unknown": "unknown",
+        "pan_left": "pan",
+        "pan_right": "pan",
+        "tilt_up": "tilt",
+        "tilt_down": "tilt",
+        "zoom_in": "zoom",
+        "zoom_out": "zoom",
+        "high_motion": "handheld",
+    }
+    return mapping.get(str(value or "").strip().lower(), "unknown")
+
+
+def normalize_shot_type(value: str | None) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    mapping = {
+        "close_up": "closeup",
+        "closeup": "closeup",
+        "medium": "medium",
+        "wide": "wide",
+        "detail": "detail",
+        "establishing": "establishing",
+    }
+    return mapping.get(normalized, "unknown")
+
+
+def normalize_subject_position(value: str | None) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if normalized in {"center", "left", "right", "top", "bottom", "full_frame"}:
+        return normalized
+    return "unknown"
+
+
 def build_visual_intelligence_prompt(asset: Asset) -> str:
     return (
         "Analiza 8 a 12 frames temporales de un master de video para una biblioteca editorial.\n"
@@ -470,15 +762,31 @@ def build_visual_intelligence_prompt(asset: Asset) -> str:
         '    "is_garbage": false,\n'
         '    "score": 0.0,\n'
         '    "black_or_blank": false,\n'
+        '    "subject_severely_out_of_frame": false,\n'
+        '    "subject_badly_clipped": false,\n'
+        '    "social_media_ui": false,\n'
+        '    "subscribe_cta": false,\n'
+        '    "emoji_overlay": false,\n'
+        '    "watermark": false,\n'
+        '    "logo": false,\n'
+        '    "heavy_text_overlay": false,\n'
+        '    "nearly_empty": false,\n'
         '    "severe_blur": false,\n'
+        '    "severe_black_frames": false,\n'
         '    "corrupted_frames": false,\n'
         '    "accidental_capture": false,\n'
+        '    "editorial_usable": true,\n'
         '    "reasons": []\n'
         "  },\n"
         '  "semantics": {\n'
         '    "summary_es": "",\n'
         '    "subjects": [],\n'
         '    "actions": [],\n'
+        '    "objects": [],\n'
+        '    "emotions": [],\n'
+        '    "narrative_themes": [],\n'
+        '    "possible_use_cases": [],\n'
+        '    "negative_use_cases": [],\n'
         '    "setting": null,\n'
         '    "mood": null,\n'
         '    "keywords_es": [],\n'
@@ -490,16 +798,23 @@ def build_visual_intelligence_prompt(asset: Asset) -> str:
         '    "shot_type": "",\n'
         '    "subject_position": "",\n'
         '    "subject_framing": "",\n'
+        '    "subject_region": null,\n'
+        '    "subject_trajectory": [],\n'
+        '    "negative_space": 0.0,\n'
+        '    "edge_proximity": 0.0,\n'
         '    "vertical_suitability": 0.0,\n'
         '    "horizontal_suitability": 0.0,\n'
+        '    "camera_motion": "unknown",\n'
+        '    "camera_motion_confidence": 0.0,\n'
         '    "safe_text_areas": [],\n'
         '    "crop_risk_reasons": []\n'
         "  },\n"
         '  "transforms": {\n'
-        '    "flip": {"allowed": false, "risk_reasons": []},\n'
-        '    "zoom": {"allowed": false, "max_safe_zoom": 1.0, "risk_reasons": []},\n'
-        '    "pan": {"allowed": false, "safe_directions": [], "risk_reasons": []},\n'
-        '    "crop": {"allowed": false, "preferred_aspect_ratios": [], "risk_reasons": []}\n'
+        '    "flip": {"allowed": false, "confidence": 0.0, "risk_reasons": []},\n'
+        '    "zoom": {"allowed": false, "max_safe_zoom": 1.0, "confidence": 0.0, "risk_reasons": []},\n'
+        '    "pan": {"allowed": false, "safe_directions": [], "max_offset_x": null, "max_offset_y": null, "confidence": 0.0, "risk_reasons": []},\n'
+        '    "crop_vertical": {"allowed": false, "safe_rect": null, "confidence": 0.0, "preferred_aspect_ratios": ["9:16"], "risk_reasons": []},\n'
+        '    "crop_horizontal": {"allowed": false, "safe_rect": null, "confidence": 0.0, "preferred_aspect_ratios": ["16:9"], "risk_reasons": []}\n'
         "  },\n"
         '  "confidence": 0.0,\n'
         '  "needs_human_review": false,\n'
@@ -509,11 +824,15 @@ def build_visual_intelligence_prompt(asset: Asset) -> str:
         "- quality.score combina nitidez, exposicion, estabilidad, iluminacion y consistencia temporal.\n"
         "- garbage.score mide probabilidad de asset inutil: negro, corrupto, borroso extremo o captura accidental.\n"
         "- semantics resume sujeto, accion, entorno, mood, texto visible, logos y keywords buscables.\n"
-        "- composition evalua encuadre, posicion del sujeto, suitability vertical/horizontal y zonas seguras de texto.\n"
-        "- flip.allowed=false si hay texto, logos, direccionalidad clara, manos asimetricas o señales culturales.\n"
-        "- zoom.allowed=false si el sujeto ya esta recortado, hay texto importante o poca resolucion visual.\n"
+        "- garbage contiene senales estructuradas de inutilidad editorial; usa confidence global para calibrarlas.\n"
+        "- composition evalua encuadre, posicion del sujeto, trayectoria opcional, suitability vertical/horizontal, movimiento de camara y zonas seguras de texto.\n"
+        "- camera_motion solo puede ser static, pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, handheld, tracking, high_motion o unknown.\n"
+        "- flip.allowed=false si hay texto, logos, watermark, UI social, CTAs, direccionalidad clara, manos asimetricas o señales culturales.\n"
+        "- zoom.allowed=false si el sujeto ya esta recortado, cerca de bordes, hay texto importante o poca resolucion visual; no recomiendes max_safe_zoom mayor a 1.10.\n"
         "- pan.allowed=true solo cuando hay margen compositivo; safe_directions indica direcciones sin cortar sujeto.\n"
-        "- crop.allowed=true solo si se puede recortar sin perder sujeto, producto, texto relevante o contexto esencial.\n"
+        "- crop_vertical y crop_horizontal son decisiones independientes; no infieras una desde la otra.\n"
+        "- safe_rect y subject_region son normalizados [x,y,w,h] 0..1 y pueden ser null si no hay confianza.\n"
+        "- subject_trajectory puede ser [] si no se infiere con confianza.\n"
         "- preferred_aspect_ratios solo puede usar 9:16, 16:9, 1:1 o 4:5.\n"
         "- safe_text_areas solo puede usar top, middle, bottom, left, right o none.\n"
         "- label debe ser excellent, good, usable, weak o bad.\n\n"
@@ -529,7 +848,17 @@ def apply_visual_intelligence_result(
     inputs: VisualFrameInputs,
     profile_version: str,
 ) -> None:
-    result_json = visual_result_json(asset, result, inputs, profile_version, status="ready")
+    decision = decide_visual_editorial_status(result)
+    transforms = normalize_visual_transforms(result, asset)
+    result_json = visual_result_json(
+        asset,
+        result,
+        inputs,
+        profile_version,
+        status="ready",
+        decision=decision,
+        transforms=transforms,
+    )
     session.add(
         AssetAIAnalysis(
             asset=asset,
@@ -541,26 +870,52 @@ def apply_visual_intelligence_result(
             confidence=result.confidence,
         )
     )
+    now = datetime.now(UTC)
     asset.quality_score = result.quality.score
+    asset.editorial_status = decision.status
+    asset.editorial_quality_score = result.quality.score
+    asset.vertical_suitability_score = result.composition.vertical_suitability
+    asset.horizontal_suitability_score = result.composition.horizontal_suitability
+    asset.editorial_reason_codes = decision.reason_codes
+    asset.quality_analyzed_at = now
+    asset.quality_profile_version = profile_version
+    if decision.status in {"rejected", "quarantined"}:
+        asset.auto_select_enabled = False
     asset.visual_description = result.semantics.summary_es
+    asset.action_description = ", ".join(result.semantics.actions) or asset.action_description
+    asset.emotion = ", ".join(result.semantics.emotions or ([result.semantics.mood] if result.semantics.mood else [])) or None
+    asset.location = result.semantics.setting
+    asset.best_for = ", ".join(result.semantics.possible_use_cases) or asset.best_for
+    asset.avoid_for = ", ".join(result.semantics.negative_use_cases) or asset.avoid_for
+    asset.has_visible_text = bool(result.semantics.visible_text)
+    asset.visible_text = result.semantics.visible_text
+    asset.has_logo = bool(result.garbage.logo or result.semantics.logo_or_watermark)
+    asset.has_watermark = bool(result.garbage.watermark or result.semantics.logo_or_watermark)
+    asset.shot_type = normalize_shot_type(result.composition.shot_type)
+    asset.camera_motion = normalize_camera_motion(result.composition.camera_motion)
+    asset.subject_position = normalize_subject_position(result.composition.subject_position)
+    asset.has_directional_motion = has_directional_signal(result)
     asset.search_text = " ".join(
         [
             result.semantics.summary_es,
             *result.semantics.subjects,
             *result.semantics.actions,
+            *result.semantics.objects,
+            *result.semantics.emotions,
+            *result.semantics.narrative_themes,
+            *result.semantics.possible_use_cases,
             *result.semantics.keywords_es,
         ]
     ).strip() or asset.search_text
     asset.embedding_text = asset.search_text or asset.embedding_text
-    asset.flip_horizontal_allowed = result.transforms.flip.allowed
-    asset.flip_risk_reasons = result.transforms.flip.risk_reasons
-    asset.zoom_allowed = result.transforms.zoom.allowed
-    asset.max_safe_zoom = result.transforms.zoom.max_safe_zoom
-    asset.crop_allowed = result.transforms.crop.allowed
-    asset.safe_text_areas = result.composition.safe_text_areas
+    asset.flip_horizontal_allowed = transforms.flip_allowed
+    asset.flip_risk_reasons = transforms.flip_risk_reasons
+    asset.zoom_allowed = transforms.zoom_allowed
+    asset.max_safe_zoom = transforms.max_safe_zoom
+    asset.crop_allowed = transforms.crop_allowed
+    asset.safe_text_areas = transforms.safe_text_areas
     asset.ai_enrichment_confidence = result.confidence
-    asset.enrichment_version = profile_version
-    asset.updated_at = datetime.now(UTC)
+    asset.updated_at = now
 
 
 def apply_failed_visual_intelligence_result(
@@ -596,6 +951,8 @@ def visual_result_json(
     profile_version: str,
     *,
     status: str,
+    decision: VisualEditorialDecision | None = None,
+    transforms: NormalizedVisualTransforms | None = None,
 ) -> dict[str, Any]:
     return {
         "analysis_type": VISUAL_ANALYSIS_TYPE,
@@ -606,6 +963,11 @@ def visual_result_json(
         "frame_cache_path": str(inputs.frame_cache_dir),
         "frames": [path.name for path in inputs.frame_paths],
         "visual": result.model_dump(mode="json"),
+        "editorial_policy": {
+            "status": decision.status if decision else None,
+            "reason_codes": decision.reason_codes if decision else [],
+        },
+        "normalized_transforms": transforms.__dict__ if transforms else None,
         "error": None,
     }
 
