@@ -105,6 +105,8 @@ def post_chat_completion(
     model: str,
     timeout_seconds: float,
     max_tokens: int | None = None,
+    extra_body: dict[str, Any] | None = None,
+    provider_options: dict[str, Any] | None = None,
 ) -> str:
     settings = get_settings()
     payload = {
@@ -115,6 +117,10 @@ def post_chat_completion(
         "max_tokens": max_tokens if max_tokens is not None else settings.nvidia_max_tokens,
         "stream": False,
     }
+    if extra_body:
+        payload.update(extra_body)
+    if provider_options:
+        payload.update(provider_options)
     request = urllib.request.Request(
         settings.nvidia_base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),

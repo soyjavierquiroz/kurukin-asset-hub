@@ -15,6 +15,7 @@ from app.schemas.visual_intelligence import VISUAL_PROFILE_VERSION, VisualIntell
 from app.services.ai_providers import nvidia_provider
 from app.services.ai_providers.nvidia_provider import NvidiaProviderError
 from app.services.asset_location import resolve_asset_rclone_location
+from app.services import ai_asset_enrichment
 from app.services import visual_intelligence as visual
 
 
@@ -554,6 +555,31 @@ def test_visual_caller_receives_single_contact_sheet_image_path(
     assert "NO son texto visible en el video" in str(seen["prompt"])
 
 
+def test_visual_model_is_stored_in_provenance(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "visual-model")
+    get_settings.cache_clear()
+    asset = make_asset(source, "visual-model-provenance")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+
+    visual.analyze_asset_visual_intelligence(
+        session,
+        asset.id,
+        visual_caller=lambda _prompt, _frames: good_visual_result(),
+    )
+
+    analysis = latest_analysis(session, asset)
+    assert analysis.model == "visual-model"
+    assert analysis.prompt_version == VISUAL_PROFILE_VERSION
+    assert analysis.result_json["model"] == "visual-model"
+
+
 def test_call_nvidia_visual_intelligence_uses_single_image_and_token_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -567,6 +593,7 @@ def test_call_nvidia_visual_intelligence_uses_single_image_and_token_override(
         model: str,
         timeout_seconds: float,
         max_tokens: int | None = None,
+        **_kwargs: object,
     ) -> str:
         calls.append(
             {
@@ -580,6 +607,7 @@ def test_call_nvidia_visual_intelligence_uses_single_image_and_token_override(
         return good_visual_result().model_dump_json()
 
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "visual-model")
     get_settings.cache_clear()
     monkeypatch.setattr(visual, "post_chat_completion", fake_post_chat_completion)
 
@@ -587,7 +615,33 @@ def test_call_nvidia_visual_intelligence_uses_single_image_and_token_override(
 
     assert isinstance(result, VisualIntelligenceResult)
     assert calls[0]["image_paths"] == [contact_sheet]
+    assert calls[0]["model"] == "visual-model"
     assert calls[0]["max_tokens"] == 2400
+
+
+def test_legacy_enrichment_uses_nvidia_model_not_visual_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    image_path = write_color_frames(tmp_path, [(10, 20, 30)])[0]
+    captured: dict[str, object] = {}
+
+    def fake_call_nvidia_vision(prompt: str, image_paths: list[Path], model: str | None = None):
+        captured["prompt"] = prompt
+        captured["image_paths"] = image_paths
+        captured["model"] = model
+        return good_visual_result()
+
+    monkeypatch.setenv("AI_PROVIDER", "nvidia")
+    monkeypatch.setenv("NVIDIA_MODEL", "legacy-model")
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "visual-model")
+    get_settings.cache_clear()
+    monkeypatch.setattr(ai_asset_enrichment, "call_nvidia_vision", fake_call_nvidia_vision)
+
+    ai_asset_enrichment.call_openai_vision("prompt", [image_path])
+
+    assert captured["image_paths"] == [image_path]
+    assert captured["model"] == "legacy-model"
 
 
 def test_legacy_nvidia_post_chat_completion_uses_settings_max_tokens(
@@ -614,13 +668,16 @@ def test_legacy_nvidia_post_chat_completion_uses_settings_max_tokens(
 
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
     monkeypatch.setenv("NVIDIA_MAX_TOKENS", "900")
+    monkeypatch.setenv("NVIDIA_MODEL", "legacy-model")
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "visual-model")
     get_settings.cache_clear()
     monkeypatch.setattr(nvidia_provider.urllib.request, "urlopen", fake_urlopen)
 
-    nvidia_provider.post_chat_completion("prompt", [image_path], "model", timeout_seconds=12.0)
+    nvidia_provider.post_chat_completion("prompt", [image_path], "legacy-model", timeout_seconds=12.0)
 
     payload = captured["payload"]
     assert isinstance(payload, dict)
+    assert payload["model"] == "legacy-model"
     assert payload["max_tokens"] == 900
 
 
@@ -818,7 +875,10 @@ def test_visual_status_failed_is_current(
 def test_successful_visual_retry_clears_current_failed_status(
     session: Session,
     source: Source,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "test-model")
+    get_settings.cache_clear()
     asset = make_asset(source, "retry-success")
     session.add(asset)
     session.flush()
@@ -881,6 +941,8 @@ def test_visual_recalibration_skips_current_visual_v1(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "test-model")
+    get_settings.cache_clear()
     asset = make_asset(source, "skip-current")
     session.add(asset)
     session.flush()
@@ -904,6 +966,62 @@ def test_visual_recalibration_skips_current_visual_v1(
     )
 
     assert len(asset.ai_analyses) == 1
+
+
+def test_visual_model_change_reprocesses_without_regenerating_cached_frames(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "previews"))
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "new-visual-model")
+    get_settings.cache_clear()
+    asset = make_asset(source, "model-change-cache")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.flush()
+    frame_dir = visual.visual_frame_cache_dir(asset.id)
+    frames = write_frames(frame_dir, 10)
+    visual.write_visual_frame_manifest(frame_dir, VISUAL_PROFILE_VERSION, visual.source_fingerprint(asset), 11.0, frames)
+    visual.ensure_visual_contact_sheet(frames, frame_dir)
+    session.add(
+        AssetAIAnalysis(
+            asset=asset,
+            model="old-visual-model",
+            provider="nvidia",
+            input_type="visual_intelligence",
+            prompt_version=VISUAL_PROFILE_VERSION,
+            result_json={"status": "ready", "source_fingerprint": visual.source_fingerprint(asset)},
+        )
+    )
+    session.commit()
+
+    monkeypatch.setattr(
+        visual.RcloneService,
+        "copyto",
+        lambda *_args, **_kwargs: pytest.fail("rclone should not run for cached frames"),
+    )
+    monkeypatch.setattr(
+        visual,
+        "extract_temporal_frames",
+        lambda *_args, **_kwargs: pytest.fail("ffmpeg should not run for cached frames"),
+    )
+
+    result = visual.reprocess_visual_assets(
+        session,
+        [asset.id],
+        apply=True,
+        visual_caller=lambda _prompt, _frames: good_visual_result(),
+    )
+
+    analysis = latest_analysis(session, asset)
+    assert result.processed == 1
+    assert result.failed == 0
+    assert analysis.model == "new-visual-model"
+    assert analysis.result_json["frame_cache_path"] == str(frame_dir)
+    assert len(asset.ai_analyses) == 2
+    assert asset.asset_uid == original_uid
 
 
 def test_visual_recalibration_visual_v2_is_candidate_and_asset_uid_stable(

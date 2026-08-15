@@ -312,6 +312,7 @@ def select_visual_candidate_ids(
             .where(
                 AssetAIAnalysis.prompt_version == profile_version,
                 AssetAIAnalysis.input_type == VISUAL_ANALYSIS_TYPE,
+                AssetAIAnalysis.model == get_settings().nvidia_visual_model,
                 AssetAIAnalysis.result_json["status"].as_string() == "ready",
             )
         )
@@ -334,6 +335,7 @@ def count_remaining_visual_assets(
             .where(
                 AssetAIAnalysis.prompt_version == profile_version,
                 AssetAIAnalysis.input_type == VISUAL_ANALYSIS_TYPE,
+                AssetAIAnalysis.model == get_settings().nvidia_visual_model,
                 AssetAIAnalysis.result_json["status"].as_string() == "ready",
             )
         )
@@ -364,7 +366,11 @@ def asset_visual_is_current(asset: Asset, profile_version: str) -> bool:
     if analysis is None:
         return False
     result = analysis.result_json or {}
-    return result.get("status") == "ready" and result.get("source_fingerprint") == source_fingerprint(asset)
+    return (
+        analysis.model == get_settings().nvidia_visual_model
+        and result.get("status") == "ready"
+        and result.get("source_fingerprint") == source_fingerprint(asset)
+    )
 
 
 def latest_visual_analysis(asset: Asset, profile_version: str = VISUAL_PROFILE_VERSION) -> AssetAIAnalysis | None:
@@ -645,7 +651,7 @@ def call_nvidia_visual_intelligence(
     text = post_chat_completion(
         prompt,
         image_paths,
-        settings.nvidia_model,
+        settings.nvidia_visual_model,
         timeout_seconds=90.0,
         max_tokens=VISUAL_V1_NVIDIA_MAX_TOKENS,
     )
@@ -977,7 +983,7 @@ def apply_visual_intelligence_result(
     session.add(
         AssetAIAnalysis(
             asset=asset,
-            model=get_settings().nvidia_model,
+            model=get_settings().nvidia_visual_model,
             provider="nvidia",
             input_type=VISUAL_ANALYSIS_TYPE,
             prompt_version=profile_version,
@@ -1042,13 +1048,14 @@ def apply_failed_visual_intelligence_result(
     session.add(
         AssetAIAnalysis(
             asset=asset,
-            model=get_settings().nvidia_model,
+            model=get_settings().nvidia_visual_model,
             provider="nvidia",
             input_type=VISUAL_ANALYSIS_TYPE,
             prompt_version=profile_version,
             result_json={
                 "analysis_type": VISUAL_ANALYSIS_TYPE,
                 "profile_version": profile_version,
+                "model": get_settings().nvidia_visual_model,
                 "status": "failed",
                 "source_fingerprint": source_fingerprint(asset),
                 "error": sanitize_provider_error(str(exc)),
@@ -1072,6 +1079,7 @@ def visual_result_json(
     return {
         "analysis_type": VISUAL_ANALYSIS_TYPE,
         "profile_version": profile_version,
+        "model": get_settings().nvidia_visual_model,
         "status": status,
         "source_fingerprint": source_fingerprint(asset),
         "frame_count": len(inputs.frame_paths),

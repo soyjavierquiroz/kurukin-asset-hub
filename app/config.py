@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     nvidia_api_key: str | None = Field(default=None, alias="NVIDIA_API_KEY")
     nvidia_base_url: str = Field(default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL")
     nvidia_model: str = Field(default="nvidia/nemotron-nano-12b-v2-vl", alias="NVIDIA_MODEL")
+    nvidia_visual_model: str = Field(
+        default="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        alias="NVIDIA_VISUAL_MODEL",
+    )
     nvidia_max_tokens: int = Field(default=900, ge=1, alias="NVIDIA_MAX_TOKENS")
     nvidia_max_concurrency: int = Field(default=1, ge=1, alias="NVIDIA_MAX_CONCURRENCY")
     ai_enrichment_enabled: bool = Field(default=False, alias="AI_ENRICHMENT_ENABLED")
