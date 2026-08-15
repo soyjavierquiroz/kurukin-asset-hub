@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -10,6 +12,8 @@ from app.config import get_settings
 from app.db import Base
 from app.models import Asset, AssetAIAnalysis, Source
 from app.schemas.visual_intelligence import VISUAL_PROFILE_VERSION, VisualIntelligenceResult
+from app.services.ai_providers import nvidia_provider
+from app.services.ai_providers.nvidia_provider import NvidiaProviderError
 from app.services.asset_location import resolve_asset_rclone_location
 from app.services import visual_intelligence as visual
 
@@ -91,8 +95,44 @@ def test_collect_visual_frames_downloads_master_and_caches_frames(
     assert not inputs.master_path.exists()
     assert inputs.frame_cache_dir == tmp_path / "previews" / str(asset.id) / "visual-v1-frames"
     assert len(inputs.frame_paths) == 10
+    assert inputs.contact_sheet_path == inputs.frame_cache_dir / "contact-sheet.jpg"
+    assert inputs.contact_sheet_path.is_file()
     manifest = inputs.frame_cache_dir / "manifest.json"
     assert manifest.is_file()
+
+
+def test_ten_cached_frames_generate_contact_sheet(tmp_path: Path) -> None:
+    frame_dir = tmp_path / "frames"
+    frames = write_color_frames(frame_dir, color_sequence())
+
+    contact_sheet = visual.ensure_visual_contact_sheet(frames, frame_dir)
+
+    assert contact_sheet == frame_dir / "contact-sheet.jpg"
+    with Image.open(contact_sheet) as image:
+        assert image.width <= 1800
+        assert image.height <= 1800
+
+
+def test_contact_sheet_contains_all_frames_in_chronological_order_without_labels(tmp_path: Path) -> None:
+    frame_dir = tmp_path / "frames"
+    colors = color_sequence()
+    frames = write_color_frames(frame_dir, colors)
+
+    contact_sheet = visual.ensure_visual_contact_sheet(frames, frame_dir)
+
+    with Image.open(contact_sheet) as image:
+        tile_width = image.width // 5
+        tile_height = image.height // 2
+        for index, expected in enumerate(colors):
+            left = (index % 5) * tile_width
+            top = (index // 5) * tile_height
+            sample_points = [
+                (left + tile_width // 2, top + tile_height // 2),
+                (left + tile_width // 4, top + tile_height // 4),
+                (left + (tile_width * 3) // 4, top + (tile_height * 3) // 4),
+            ]
+            for point in sample_points:
+                assert color_close(image.getpixel(point), expected)
 
 
 def test_resolve_asset_rclone_location_prefixes_catalog_path_with_source_root(
@@ -222,6 +262,8 @@ def test_collect_visual_frames_reuses_same_fingerprint_without_rclone(
 
     assert len(first.frame_paths) == 10
     assert len(second.frame_paths) == 10
+    assert first.contact_sheet_path.is_file()
+    assert second.contact_sheet_path.is_file()
     assert calls == {"rclone": 1, "ffmpeg": 1}
 
 
@@ -240,6 +282,7 @@ def test_collect_visual_frames_valid_cache_avoids_rclone_and_location_resolution
     frame_dir = visual.visual_frame_cache_dir(asset.id)
     frames = write_frames(frame_dir, 10)
     visual.write_visual_frame_manifest(frame_dir, VISUAL_PROFILE_VERSION, visual.source_fingerprint(asset), 11.0, frames)
+    visual.ensure_visual_contact_sheet(frames, frame_dir)
 
     def fail_copyto(*_args, **_kwargs):
         raise AssertionError("rclone should not run for a valid frame cache")
@@ -253,6 +296,40 @@ def test_collect_visual_frames_valid_cache_avoids_rclone_and_location_resolution
     inputs = visual.collect_visual_frames(asset)
 
     assert len(inputs.frame_paths) == 10
+    assert inputs.contact_sheet_path == frame_dir / "contact-sheet.jpg"
+
+
+def test_collect_visual_frames_creates_missing_contact_sheet_from_cached_frames_only(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "previews"))
+    get_settings.cache_clear()
+    asset = make_asset(source, "cache-create-contact")
+    session.add(asset)
+    session.commit()
+    frame_dir = visual.visual_frame_cache_dir(asset.id)
+    frames = write_frames(frame_dir, 10)
+    visual.write_visual_frame_manifest(frame_dir, VISUAL_PROFILE_VERSION, visual.source_fingerprint(asset), 11.0, frames)
+
+    monkeypatch.setattr(
+        visual.RcloneService,
+        "copyto",
+        lambda *_args, **_kwargs: pytest.fail("rclone should not run when frames are cached"),
+    )
+    monkeypatch.setattr(
+        visual,
+        "extract_temporal_frames",
+        lambda *_args, **_kwargs: pytest.fail("ffmpeg should not run when frames are cached"),
+    )
+
+    inputs = visual.collect_visual_frames(asset)
+
+    assert inputs.frame_paths == frames
+    assert inputs.contact_sheet_path.is_file()
+    assert inputs.sample_timestamps == visual.visual_frame_timestamps(10, 11.0)
 
 
 def test_collect_visual_frames_regenerates_when_source_fingerprint_changes(
@@ -312,6 +389,34 @@ def test_visual_location_failure_is_operational_not_rejected_and_keeps_asset_uid
         force=True,
         visual_caller=lambda _prompt, _frames: good_visual_result(),
     )
+
+    analysis = latest_analysis(session, analyzed)
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["error_type"] == "operational_failure"
+    assert analyzed.editorial_status != "rejected"
+    assert analyzed.asset_uid == original_uid
+
+
+def test_visual_provider_500_is_operational_not_rejected_and_keeps_asset_uid(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-500")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+
+    def fail_provider(*_args, **_kwargs):
+        raise NvidiaProviderError("EngineCore encountered an issue HTTP 500")
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual, "post_chat_completion", fail_provider)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
 
     analysis = latest_analysis(session, analyzed)
     assert analysis.result_json["status"] == "failed"
@@ -420,6 +525,103 @@ def test_visual_analysis_persists_structured_json_and_updates_asset(
     assert asset.location == "oficina"
     assert asset.best_for == "tutoriales"
     assert asset.avoid_for == "deportes"
+
+
+def test_visual_caller_receives_single_contact_sheet_image_path(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "single-contact")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    seen: dict[str, object] = {}
+
+    def fake_visual_caller(prompt: str, image_paths: list[Path]) -> VisualIntelligenceResult:
+        seen["prompt"] = prompt
+        seen["image_paths"] = image_paths
+        return good_visual_result()
+
+    visual.analyze_asset_visual_intelligence(session, asset.id, visual_caller=fake_visual_caller)
+
+    image_paths = seen["image_paths"]
+    assert isinstance(image_paths, list)
+    assert image_paths == [tmp_path / "previews" / str(asset.id) / "visual-v1-frames" / "contact-sheet.jpg"]
+    assert "cuadricula cronologica" in str(seen["prompt"])
+    assert "sample timestamps: [" in str(seen["prompt"])
+    assert "NO son texto visible en el video" in str(seen["prompt"])
+
+
+def test_call_nvidia_visual_intelligence_uses_single_image_and_token_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    contact_sheet = write_color_frames(tmp_path, [(120, 30, 200)])[0]
+    calls: list[dict[str, object]] = []
+
+    def fake_post_chat_completion(
+        prompt: str,
+        image_paths: list[Path],
+        model: str,
+        timeout_seconds: float,
+        max_tokens: int | None = None,
+    ) -> str:
+        calls.append(
+            {
+                "prompt": prompt,
+                "image_paths": image_paths,
+                "model": model,
+                "timeout_seconds": timeout_seconds,
+                "max_tokens": max_tokens,
+            }
+        )
+        return good_visual_result().model_dump_json()
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual, "post_chat_completion", fake_post_chat_completion)
+
+    result = visual.call_nvidia_visual_intelligence("prompt", [contact_sheet])
+
+    assert isinstance(result, VisualIntelligenceResult)
+    assert calls[0]["image_paths"] == [contact_sheet]
+    assert calls[0]["max_tokens"] == 2400
+
+
+def test_legacy_nvidia_post_chat_completion_uses_settings_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    image_path = write_color_frames(tmp_path, [(10, 20, 30)])[0]
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"choices":[{"message":{"content":"{}"}}]}'
+
+    def fake_urlopen(request, timeout: float):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    monkeypatch.setenv("NVIDIA_MAX_TOKENS", "900")
+    get_settings.cache_clear()
+    monkeypatch.setattr(nvidia_provider.urllib.request, "urlopen", fake_urlopen)
+
+    nvidia_provider.post_chat_completion("prompt", [image_path], "model", timeout_seconds=12.0)
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["max_tokens"] == 900
 
 
 @pytest.mark.parametrize(
@@ -919,13 +1121,40 @@ def visual_result_with_garbage(**flags: bool) -> VisualIntelligenceResult:
 
 
 def write_frames(output_dir: Path, count: int) -> list[Path]:
+    colors = [
+        ((index * 23) % 256, (index * 47) % 256, (index * 71) % 256)
+        for index in range(1, count + 1)
+    ]
+    return write_color_frames(output_dir, colors)
+
+
+def write_color_frames(output_dir: Path, colors: list[tuple[int, int, int]]) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     frames = []
-    for index in range(1, count + 1):
+    for index, color in enumerate(colors, start=1):
         frame = output_dir / f"frame_{index:03d}.jpg"
-        frame.write_bytes(b"jpg")
+        Image.new("RGB", (40, 40), color).save(frame, format="JPEG", quality=100)
         frames.append(frame)
     return frames
+
+
+def color_sequence() -> list[tuple[int, int, int]]:
+    return [
+        (220, 20, 60),
+        (255, 140, 0),
+        (255, 215, 0),
+        (50, 205, 50),
+        (0, 128, 255),
+        (75, 0, 130),
+        (199, 21, 133),
+        (0, 206, 209),
+        (128, 128, 128),
+        (255, 255, 255),
+    ]
+
+
+def color_close(actual: tuple[int, int, int], expected: tuple[int, int, int]) -> bool:
+    return all(abs(channel - target) <= 6 for channel, target in zip(actual, expected, strict=True))
 
 
 def patch_frame_collection(
@@ -934,11 +1163,16 @@ def patch_frame_collection(
     asset_id: int,
 ) -> None:
     frame_dir = tmp_path / "previews" / str(asset_id) / "visual-v1-frames"
+    frames = write_frames(frame_dir, 10)
+    visual.write_visual_frame_manifest(frame_dir, VISUAL_PROFILE_VERSION, "test-fingerprint", 11.0, frames)
+    contact_sheet = visual.ensure_visual_contact_sheet(frames, frame_dir)
     inputs = visual.VisualFrameInputs(
         master_path=tmp_path / "master.mp4",
-        frame_paths=write_frames(frame_dir, 10),
+        frame_paths=frames,
+        contact_sheet_path=contact_sheet,
         frame_cache_dir=frame_dir,
         temp_dir=tmp_path / "temp",
+        sample_timestamps=visual.visual_frame_timestamps(10, 11.0),
     )
     inputs.master_path.write_bytes(b"master")
     monkeypatch.setattr(visual, "collect_visual_frames", lambda _asset, _profile_version="visual-v1": inputs)

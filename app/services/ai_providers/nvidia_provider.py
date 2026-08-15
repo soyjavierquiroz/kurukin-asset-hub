@@ -99,14 +99,20 @@ def call_nvidia_vision(
     return reduced_to_asset_result(reduced)
 
 
-def post_chat_completion(prompt: str, image_paths: list[Path], model: str, timeout_seconds: float) -> str:
+def post_chat_completion(
+    prompt: str,
+    image_paths: list[Path],
+    model: str,
+    timeout_seconds: float,
+    max_tokens: int | None = None,
+) -> str:
     settings = get_settings()
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": build_vision_chat_content(prompt, image_paths)}],
         "temperature": 0.1,
         "top_p": 0.9,
-        "max_tokens": settings.nvidia_max_tokens,
+        "max_tokens": max_tokens if max_tokens is not None else settings.nvidia_max_tokens,
         "stream": False,
     }
     request = urllib.request.Request(

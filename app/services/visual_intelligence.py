@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -31,6 +32,9 @@ VISUAL_TERMINAL_STATUSES = ("ready", "failed")
 HIGH_CONFIDENCE_THRESHOLD = 0.75
 LOW_CONFIDENCE_THRESHOLD = 0.60
 MIN_CACHED_VISUAL_FRAMES = 8
+CONTACT_SHEET_FILENAME = "contact-sheet.jpg"
+CONTACT_SHEET_MAX_DIMENSION = 1800
+VISUAL_V1_NVIDIA_MAX_TOKENS = 2400
 MAX_VISUAL_V1_ZOOM = 1.10
 HARD_REJECT_FLAGS = (
     "subject_severely_out_of_frame",
@@ -53,8 +57,10 @@ class VisualIntelligenceOperationalError(RuntimeError):
 class VisualFrameInputs:
     master_path: Path
     frame_paths: list[Path]
+    contact_sheet_path: Path
     frame_cache_dir: Path
     temp_dir: Path
+    sample_timestamps: list[float | None]
 
 
 @dataclass(frozen=True)
@@ -123,7 +129,7 @@ def analyze_asset_visual_intelligence(
     try:
         inputs = collect_visual_frames(asset, profile_version)
         caller = visual_caller or call_nvidia_visual_intelligence
-        result = caller(build_visual_intelligence_prompt(asset), inputs.frame_paths)
+        result = caller(build_visual_intelligence_prompt(asset, inputs.sample_timestamps), [inputs.contact_sheet_path])
         apply_visual_intelligence_result(session, asset, result, inputs, profile_version)
         session.commit()
         return asset
@@ -397,13 +403,16 @@ def collect_visual_frames(asset: Asset, profile_version: str = VISUAL_PROFILE_VE
     master_path = temp_dir / safe_asset_uid(asset.filename or f"asset-{asset.id}.mp4")
     frame_cache_dir = visual_frame_cache_dir(asset.id, profile_version)
     fingerprint = source_fingerprint(asset)
-    cached_frames = read_cached_visual_frames(frame_cache_dir, profile_version, fingerprint)
+    cached_frames, cached_timestamps = read_cached_visual_frames(frame_cache_dir, profile_version, fingerprint)
     if len(cached_frames) >= MIN_CACHED_VISUAL_FRAMES:
+        contact_sheet = ensure_visual_contact_sheet(cached_frames, frame_cache_dir)
         return VisualFrameInputs(
             master_path=master_path,
             frame_paths=cached_frames,
+            contact_sheet_path=contact_sheet,
             frame_cache_dir=frame_cache_dir,
             temp_dir=temp_dir,
+            sample_timestamps=cached_timestamps,
         )
 
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -422,11 +431,14 @@ def collect_visual_frames(asset: Asset, profile_version: str = VISUAL_PROFILE_VE
         if len(frames) < MIN_CACHED_VISUAL_FRAMES:
             raise VisualIntelligenceOperationalError("visual intelligence requires at least 8 temporal frames")
         write_visual_frame_manifest(frame_cache_dir, profile_version, fingerprint, asset.duration_seconds, frames)
+        contact_sheet = ensure_visual_contact_sheet(frames, frame_cache_dir)
         return VisualFrameInputs(
             master_path=master_path,
             frame_paths=frames,
+            contact_sheet_path=contact_sheet,
             frame_cache_dir=frame_cache_dir,
             temp_dir=temp_dir,
+            sample_timestamps=visual_frame_timestamps(len(frames), asset.duration_seconds),
         )
     finally:
         master_path.unlink(missing_ok=True)
@@ -436,15 +448,18 @@ def visual_frame_cache_dir(asset_id: int, profile_version: str = VISUAL_PROFILE_
     return Path(get_settings().pilot_preview_root) / str(asset_id) / f"{profile_version}-frames"
 
 
-def read_cached_visual_frames(frame_cache_dir: Path, profile_version: str, fingerprint: str) -> list[Path]:
+def read_cached_visual_frames(
+    frame_cache_dir: Path, profile_version: str, fingerprint: str
+) -> tuple[list[Path], list[float | None]]:
     manifest_path = frame_cache_dir / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return [], []
     if manifest.get("profile_version") != profile_version or manifest.get("source_fingerprint") != fingerprint:
-        return []
+        return [], []
     frames: list[Path] = []
+    timestamps: list[float | None] = []
     for item in manifest.get("frames") or []:
         if not isinstance(item, dict):
             continue
@@ -452,9 +467,81 @@ def read_cached_visual_frames(frame_cache_dir: Path, profile_version: str, finge
         if not isinstance(filename, str) or "/" in filename or "\\" in filename:
             continue
         frame_path = frame_cache_dir / filename
-        if frame_path.is_file() and frame_path.stat().st_size > 0:
+        if is_valid_visual_frame(frame_path):
             frames.append(frame_path)
-    return frames
+            timestamp = item.get("timestamp")
+            timestamps.append(float(timestamp) if isinstance(timestamp, int | float) else None)
+    return frames, timestamps
+
+
+def is_valid_visual_frame(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size <= 0:
+        return False
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except (OSError, UnidentifiedImageError):
+        return False
+
+
+def ensure_visual_contact_sheet(frame_paths: list[Path], frame_cache_dir: Path) -> Path:
+    contact_sheet = frame_cache_dir / CONTACT_SHEET_FILENAME
+    if is_valid_contact_sheet(contact_sheet):
+        return contact_sheet
+    create_visual_contact_sheet(frame_paths, contact_sheet)
+    if not is_valid_contact_sheet(contact_sheet):
+        raise VisualIntelligenceOperationalError("visual contact sheet could not be created")
+    return contact_sheet
+
+
+def is_valid_contact_sheet(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size <= 0:
+        return False
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            return image.width > 0 and image.height > 0
+    except (OSError, UnidentifiedImageError):
+        return False
+
+
+def create_visual_contact_sheet(frame_paths: list[Path], output_path: Path) -> None:
+    frames: list[Image.Image] = []
+    try:
+        for path in frame_paths:
+            with Image.open(path) as image:
+                frames.append(image.convert("RGB").copy())
+        if not frames:
+            raise VisualIntelligenceOperationalError("visual contact sheet requires frames")
+        columns = 5 if len(frames) >= 5 else len(frames)
+        rows = (len(frames) + columns - 1) // columns
+        tile_width = max(1, CONTACT_SHEET_MAX_DIMENSION // columns)
+        median_aspect = sorted(image.height / image.width for image in frames)[len(frames) // 2]
+        tile_height = max(1, round(tile_width * median_aspect))
+        if tile_height * rows > CONTACT_SHEET_MAX_DIMENSION:
+            scale = CONTACT_SHEET_MAX_DIMENSION / (tile_height * rows)
+            tile_width = max(1, int(tile_width * scale))
+            tile_height = max(1, int(tile_height * scale))
+        sheet = Image.new("RGB", (tile_width * columns, tile_height * rows), (0, 0, 0))
+        for index, image in enumerate(frames):
+            resized = fit_frame_to_tile(image, tile_width, tile_height)
+            x = (index % columns) * tile_width + (tile_width - resized.width) // 2
+            y = (index // columns) * tile_height + (tile_height - resized.height) // 2
+            sheet.paste(resized, (x, y))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sheet.save(output_path, format="JPEG", quality=88, optimize=True)
+    finally:
+        for frame in frames:
+            frame.close()
+
+
+def fit_frame_to_tile(image: Image.Image, tile_width: int, tile_height: int) -> Image.Image:
+    scale = min(tile_width / image.width, tile_height / image.height)
+    width = max(1, round(image.width * scale))
+    height = max(1, round(image.height * scale))
+    return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
 def write_visual_frame_manifest(
@@ -482,6 +569,13 @@ def write_visual_frame_manifest(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def visual_frame_timestamps(frame_count: int, duration_seconds: float | None) -> list[float | None]:
+    return [
+        estimated_frame_timestamp(index, frame_count, duration_seconds)
+        for index in range(1, frame_count + 1)
+    ]
 
 
 def estimated_frame_timestamp(index: int, frame_count: int, duration_seconds: float | None) -> float | None:
@@ -548,7 +642,13 @@ def call_nvidia_visual_intelligence(
     settings = get_settings()
     if not settings.nvidia_api_key:
         raise VisualIntelligenceOperationalError("NVIDIA_API_KEY is not configured")
-    text = post_chat_completion(prompt, image_paths, settings.nvidia_model, timeout_seconds=90.0)
+    text = post_chat_completion(
+        prompt,
+        image_paths,
+        settings.nvidia_model,
+        timeout_seconds=90.0,
+        max_tokens=VISUAL_V1_NVIDIA_MAX_TOKENS,
+    )
     try:
         payload = json.loads(extract_json_object(text))
     except Exception as exc:
@@ -742,9 +842,23 @@ def normalize_subject_position(value: str | None) -> str:
     return "unknown"
 
 
-def build_visual_intelligence_prompt(asset: Asset) -> str:
+def build_visual_intelligence_prompt(
+    asset: Asset, sample_timestamps: list[float | None] | None = None
+) -> str:
+    timestamp_values = [timestamp for timestamp in (sample_timestamps or []) if timestamp is not None]
+    timestamp_text = (
+        "sample timestamps: ["
+        + ", ".join(f"{timestamp:.3f}" for timestamp in timestamp_values)
+        + "]\n"
+        if timestamp_values
+        else ""
+    )
     return (
-        "Analiza 8 a 12 frames temporales de un master de video para una biblioteca editorial.\n"
+        "Analiza un contact sheet temporal de un master de video para una biblioteca editorial.\n"
+        "Esta imagen es una cuadricula cronologica de frames del mismo video, "
+        "ordenados de izquierda a derecha y de arriba abajo.\n"
+        + timestamp_text
+        + "Los timestamps son metadata del sistema y NO son texto visible en el video.\n"
         "Responde exclusivamente con un objeto JSON valido, sin markdown ni explicaciones.\n"
         "No inventes contexto fuera de lo visible. Todo texto libre debe estar en espanol neutro.\n\n"
         "Estructura obligatoria:\n"
