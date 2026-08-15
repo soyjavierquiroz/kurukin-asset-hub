@@ -1,11 +1,13 @@
 from collections.abc import Generator
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base, get_db_session
+from app.config import get_settings
 from app.main import create_app
 from app.models import (
     Asset,
@@ -1072,6 +1074,37 @@ def test_money_printer_ready_and_moved_appear() -> None:
     result = post_money_printer_search(client, {"query": "mujer telefono", "limit": 20})
 
     assert {"generic-ready", "moved-status-generic"}.issubset(money_printer_asset_ids(result))
+
+
+def test_money_printer_editorial_gate_off_preserves_current_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ASSET_EDITORIAL_GATE_ENABLED", "false")
+    get_settings.cache_clear()
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "mujer telefono", "limit": 20})
+
+    assert {"generic-ready", "moved-status-generic"}.issubset(money_printer_asset_ids(result))
+
+
+def test_money_printer_editorial_gate_on_returns_only_searchable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ASSET_EDITORIAL_GATE_ENABLED", "true")
+    get_settings.cache_clear()
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+        searchable = session.scalar(select(Asset).where(Asset.asset_uid == "generic-ready"))
+        assert searchable is not None
+        searchable.editorial_status = "searchable"
+        quarantined = session.scalar(select(Asset).where(Asset.asset_uid == "moved-status-generic"))
+        assert quarantined is not None
+        quarantined.editorial_status = "quarantined"
+        session.commit()
+
+    result = post_money_printer_search(client, {"query": "mujer telefono", "limit": 20})
+
+    assert money_printer_asset_ids(result) == {"generic-ready"}
 
 
 def test_money_printer_limit_is_respected() -> None:

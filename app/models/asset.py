@@ -109,6 +109,7 @@ USAGE_SCOPE_VALUES = (
 RIGHTS_STATUS_VALUES = ("owned", "licensed", "stock", "unknown", "restricted")
 SEGMENTATION_STATUS_VALUES = ("pending", "processing", "ready", "failed", "partial", "skipped")
 ORIGINAL_DELETE_STATUS_VALUES = ("pending", "deleted", "failed", "skipped")
+EDITORIAL_STATUS_VALUES = ("pending", "searchable", "quarantined", "rejected")
 
 
 class Asset(TimestampMixin, Base):
@@ -197,6 +198,10 @@ class Asset(TimestampMixin, Base):
             f"original_delete_status in {ORIGINAL_DELETE_STATUS_VALUES}",
             name="ck_assets_original_delete_status",
         ),
+        CheckConstraint(
+            f"editorial_status in {EDITORIAL_STATUS_VALUES}",
+            name="ck_assets_editorial_status",
+        ),
         Index("ix_assets_type", "type"),
         Index("ix_assets_status", "status"),
         Index("ix_assets_brand_id", "brand_id"),
@@ -218,6 +223,8 @@ class Asset(TimestampMixin, Base):
         Index("ix_assets_parent_asset_id", "parent_asset_id"),
         Index("ix_assets_is_derivative", "is_derivative"),
         Index("ix_assets_segmentation_status", "segmentation_status"),
+        Index("ix_assets_editorial_status", "editorial_status"),
+        Index("ix_assets_quality_profile_version", "quality_profile_version"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -302,6 +309,18 @@ class Asset(TimestampMixin, Base):
     source_hash: Mapped[str | None] = mapped_column(String(160))
     checksum: Mapped[str | None] = mapped_column(String(160))
     quality_score: Mapped[float | None] = mapped_column(Float)
+    editorial_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    editorial_quality_score: Mapped[float | None] = mapped_column(Float)
+    vertical_suitability_score: Mapped[float | None] = mapped_column(Float)
+    horizontal_suitability_score: Mapped[float | None] = mapped_column(Float)
+    editorial_reason_codes: Mapped[list | None] = mapped_column(JSON)
+    quality_profile_version: Mapped[str | None] = mapped_column(String(80))
+    quality_analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(

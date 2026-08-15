@@ -33,6 +33,10 @@ class Settings(BaseSettings):
         default=True,
         alias="JOB_ASSET_MATERIALIZATION_ENABLED",
     )
+    asset_editorial_gate_enabled: bool = Field(
+        default=False,
+        alias="ASSET_EDITORIAL_GATE_ENABLED",
+    )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     nvidia_api_key: str | None = Field(default=None, alias="NVIDIA_API_KEY")
     nvidia_base_url: str = Field(default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL")

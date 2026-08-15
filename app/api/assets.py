@@ -257,6 +257,8 @@ def search_assets_json(
         usable_production_asset_filter(),
         source_policy_filter(source_policy),
     ]
+    if get_settings().asset_editorial_gate_enabled:
+        filters.append(Asset.editorial_status == "searchable")
     text_filter = json_text_search_filter(request.query)
     if text_filter is not None:
         filters.append(text_filter)

@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Sequence
 
 from alembic.config import Config
@@ -40,6 +41,11 @@ from app.services.managed_drive_pilot import (
     approve_review_asset,
     validate_batch_source_selector,
 )
+from app.services.editorial_quality import (
+    QUALITY_PROFILE_VERSION,
+    editorial_quality_status,
+    run_editorial_quality_backfill,
+)
 
 EXIT_SUCCESS = 0
 EXIT_OPERATIONAL_FAILURE = 1
@@ -62,6 +68,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(prog="asset-hub", parents=[common])
     subparsers = parser.add_subparsers(dest="resource", required=True)
+    editorial = subparsers.add_parser("editorial", parents=[common])
+    editorial_subparsers = editorial.add_subparsers(dest="action", required=True)
+    editorial_status = editorial_subparsers.add_parser("status", parents=[common])
+    editorial_status.add_argument("--profile-version", default=QUALITY_PROFILE_VERSION)
+    quality = editorial_subparsers.add_parser("quality-backfill", parents=[common])
+    quality.add_argument("--limit", type=int)
+    quality.add_argument("--batch-size", type=int, default=20)
+    quality.add_argument("--apply", action="store_true")
+    quality.add_argument("--force", action="store_true")
+    quality.add_argument("--profile-version", default=QUALITY_PROFILE_VERSION)
+    worker = editorial_subparsers.add_parser("quality-worker", parents=[common])
+    worker.add_argument("--batch-size", type=int, default=20)
+    worker.add_argument("--interval-seconds", type=float, default=300.0)
+    worker.add_argument("--once", action="store_true")
+    worker.add_argument("--max-iterations", type=int)
+    worker.add_argument("--apply", action="store_true")
+    worker.add_argument("--force", action="store_true")
+    worker.add_argument("--profile-version", default=QUALITY_PROFILE_VERSION)
+
     drive = subparsers.add_parser("drive", parents=[common])
     drive_subparsers = drive.add_subparsers(dest="action", required=True)
 
@@ -169,11 +194,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         load_runtime_config(args)
         if args.resource == "drive" and args.action == "doctor":
             return handle_doctor(args)
-        if args.resource == "drive":
+        if args.resource in {"drive", "editorial"}:
             session_factory = pilot_session_factory(args.database_url)
             with session_factory() as session:
-                if mutating_command(args):
+                if args.resource == "drive" and mutating_command(args):
                     assert_pilot_database(session)
+                if args.resource == "editorial":
+                    return handle_editorial(args, session)
                 return handle_drive(args, session)
     except BatchLockUnavailable as exc:
         return fail(args, EXIT_LOCK_BUSY, exc)
@@ -184,6 +211,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:
         return fail(args, EXIT_OPERATIONAL_FAILURE, exc)
     return EXIT_INVALID_CONFIG
+
+
+def handle_editorial(args: argparse.Namespace, session: Session) -> int:
+    if args.action == "status":
+        data = editorial_quality_status(session, profile_version=args.profile_version)
+        output(args, data, editorial_status_lines(data))
+        return EXIT_SUCCESS
+    if args.action == "quality-backfill":
+        result = run_editorial_quality_backfill(
+            session,
+            limit=args.limit,
+            batch_size=args.batch_size,
+            apply=args.apply,
+            force=args.force,
+            profile_version=args.profile_version,
+        )
+        data = result.to_dict()
+        output(args, data, editorial_backfill_lines(data))
+        return EXIT_OPERATIONAL_FAILURE if data["failed"] else EXIT_SUCCESS
+    if args.action == "quality-worker":
+        return handle_editorial_quality_worker(args, session)
+    return EXIT_INVALID_CONFIG
+
+
+def handle_editorial_quality_worker(args: argparse.Namespace, session: Session) -> int:
+    iterations = 0
+    last_failed = 0
+    while True:
+        result = run_editorial_quality_backfill(
+            session,
+            limit=args.batch_size,
+            batch_size=args.batch_size,
+            apply=args.apply,
+            force=args.force,
+            profile_version=args.profile_version,
+        )
+        data = result.to_dict()
+        output(args, data, editorial_backfill_lines(data))
+        last_failed = data["failed"]
+        iterations += 1
+        if args.once or (args.max_iterations is not None and iterations >= args.max_iterations):
+            break
+        if data["remaining"] == 0 and not args.force:
+            time.sleep(max(1.0, args.interval_seconds))
+            continue
+        time.sleep(max(0.0, args.interval_seconds))
+    return EXIT_OPERATIONAL_FAILURE if last_failed else EXIT_SUCCESS
 
 
 def handle_drive(args: argparse.Namespace, session: Session) -> int:
@@ -430,6 +504,10 @@ def current_database_name(session: Session) -> str:
 
 
 def mutating_command(args: argparse.Namespace) -> bool:
+    if getattr(args, "resource", None) == "editorial":
+        return getattr(args, "action", None) in {"quality-backfill", "quality-worker"} and bool(
+            getattr(args, "apply", False)
+        )
     if args.action == "batch":
         return bool(args.apply)
     if args.action in {"replan-reviewed", "rename-reviewed"}:
@@ -599,6 +677,35 @@ def status_lines(data: dict[str, Any]) -> list[str]:
     lines = [f"{key.upper()}={value}" for key, value in data["summary"].items()]
     lines.extend(row_lines(data["assets"]))
     return lines
+
+
+def editorial_status_lines(data: dict[str, Any]) -> list[str]:
+    pipeline = data["pipeline"]
+    return [
+        f"TOTAL={data['total']}",
+        f"PENDING={data['pending']}",
+        f"SEARCHABLE={data['searchable']}",
+        f"QUARANTINED={data['quarantined']}",
+        f"REJECTED={data['rejected']}",
+        f"PROFILE_VERSION={pipeline['profile_version']}",
+        f"PROCESSED={pipeline['processed']}",
+        f"FAILED={pipeline['failed']}",
+        f"REMAINING={pipeline['remaining']}",
+    ]
+
+
+def editorial_backfill_lines(data: dict[str, Any]) -> list[str]:
+    return [
+        f"DRY_RUN={'YES' if data['dry_run'] else 'NO'}",
+        f"PROFILE_VERSION={data['profile_version']}",
+        f"LIMIT={data['limit'] if data['limit'] is not None else ''}",
+        f"BATCH_SIZE={data['batch_size']}",
+        f"SELECTED={data['selected']}",
+        f"PROCESSED={data['processed']}",
+        f"SKIPPED={data['skipped']}",
+        f"FAILED={data['failed']}",
+        f"REMAINING={data['remaining']}",
+    ]
 
 
 def row_lines(rows: list[dict[str, Any]]) -> list[str]:

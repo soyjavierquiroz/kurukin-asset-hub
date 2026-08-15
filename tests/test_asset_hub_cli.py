@@ -392,6 +392,165 @@ def test_second_apply_noop_exit_success(tmp_path: Path, monkeypatch: pytest.Monk
     assert code == 0
 
 
+def test_editorial_status_cli_outputs_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    env_file = write_env(tmp_path)
+
+    def fake_status(_session, *, profile_version):
+        return {
+            "total": 4,
+            "pending": 1,
+            "searchable": 2,
+            "quarantined": 1,
+            "rejected": 0,
+            "pipeline": {
+                "profile_version": profile_version,
+                "processed": 3,
+                "failed": 0,
+                "remaining": 1,
+            },
+        }
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "editorial_quality_status", fake_status)
+
+    code = asset_hub.main(["--env-file", str(env_file), "editorial", "status"])
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "TOTAL=4" in output
+    assert "PENDING=1" in output
+    assert "REMAINING=1" in output
+
+
+def test_editorial_quality_backfill_cli_passes_batch_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_backfill(_session, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "dry_run": not kwargs["apply"],
+                "profile_version": kwargs["profile_version"],
+                "limit": kwargs["limit"],
+                "batch_size": kwargs["batch_size"],
+                "selected": 10,
+                "processed": 10,
+                "skipped": 0,
+                "failed": 0,
+                "remaining": 0,
+            }
+        )
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_editorial_quality_backfill", fake_backfill)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "editorial",
+            "quality-backfill",
+            "--limit",
+            "10",
+            "--batch-size",
+            "5",
+            "--apply",
+            "--force",
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    assert captured["limit"] == 10
+    assert captured["batch_size"] == 5
+    assert captured["apply"] is True
+    assert captured["force"] is True
+
+
+def test_editorial_apply_does_not_require_pilot_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = write_env(tmp_path)
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "assert_pilot_database", lambda _session: pytest.fail("pilot assert should not run"))
+    monkeypatch.setattr(
+        asset_hub,
+        "run_editorial_quality_backfill",
+        lambda _session, **kwargs: SimpleNamespace(
+            to_dict=lambda: {
+                "dry_run": not kwargs["apply"],
+                "profile_version": kwargs["profile_version"],
+                "limit": kwargs["limit"],
+                "batch_size": kwargs["batch_size"],
+                "selected": 0,
+                "processed": 0,
+                "skipped": 0,
+                "failed": 0,
+                "remaining": 0,
+            }
+        ),
+    )
+
+    code = asset_hub.main(
+        ["--env-file", str(env_file), "editorial", "quality-backfill", "--apply", "--quiet"]
+    )
+
+    assert code == 0
+
+
+def test_editorial_quality_worker_once_runs_one_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = write_env(tmp_path)
+    calls = []
+
+    def fake_backfill(_session, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "dry_run": not kwargs["apply"],
+                "profile_version": kwargs["profile_version"],
+                "limit": kwargs["limit"],
+                "batch_size": kwargs["batch_size"],
+                "selected": 1,
+                "processed": 1,
+                "skipped": 0,
+                "failed": 0,
+                "remaining": 0,
+            }
+        )
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_editorial_quality_backfill", fake_backfill)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "editorial",
+            "quality-worker",
+            "--batch-size",
+            "3",
+            "--once",
+            "--apply",
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 3
+    assert calls[0]["batch_size"] == 3
+    assert calls[0]["apply"] is True
+
+
 def sqlite_factory():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
