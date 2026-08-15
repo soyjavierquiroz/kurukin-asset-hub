@@ -46,6 +46,12 @@ from app.services.editorial_quality import (
     editorial_quality_status,
     run_editorial_quality_backfill,
 )
+from app.services.visual_intelligence import (
+    VISUAL_PROFILE_VERSION,
+    reprocess_visual_assets,
+    run_visual_intelligence_backfill,
+    visual_intelligence_status,
+)
 
 EXIT_SUCCESS = 0
 EXIT_OPERATIONAL_FAILURE = 1
@@ -86,6 +92,21 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--apply", action="store_true")
     worker.add_argument("--force", action="store_true")
     worker.add_argument("--profile-version", default=QUALITY_PROFILE_VERSION)
+
+    visual = subparsers.add_parser("visual", parents=[common])
+    visual_subparsers = visual.add_subparsers(dest="action", required=True)
+    visual_status = visual_subparsers.add_parser("status", parents=[common])
+    visual_status.add_argument("--profile-version", default=VISUAL_PROFILE_VERSION)
+    visual_backfill = visual_subparsers.add_parser("backfill", parents=[common])
+    visual_backfill.add_argument("--limit", type=int)
+    visual_backfill.add_argument("--batch-size", type=int, default=20)
+    visual_backfill.add_argument("--apply", action="store_true")
+    visual_backfill.add_argument("--force", action="store_true")
+    visual_backfill.add_argument("--profile-version", default=VISUAL_PROFILE_VERSION)
+    visual_reprocess = visual_subparsers.add_parser("reprocess", parents=[common])
+    visual_reprocess.add_argument("--asset-id", type=int, action="append", required=True)
+    visual_reprocess.add_argument("--apply", action="store_true")
+    visual_reprocess.add_argument("--profile-version", default=VISUAL_PROFILE_VERSION)
 
     drive = subparsers.add_parser("drive", parents=[common])
     drive_subparsers = drive.add_subparsers(dest="action", required=True)
@@ -194,13 +215,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         load_runtime_config(args)
         if args.resource == "drive" and args.action == "doctor":
             return handle_doctor(args)
-        if args.resource in {"drive", "editorial"}:
+        if args.resource in {"drive", "editorial", "visual"}:
             session_factory = pilot_session_factory(args.database_url)
             with session_factory() as session:
-                if args.resource == "drive" and mutating_command(args):
+                if args.resource in {"drive", "visual"} and mutating_command(args):
                     assert_pilot_database(session)
                 if args.resource == "editorial":
                     return handle_editorial(args, session)
+                if args.resource == "visual":
+                    return handle_visual(args, session)
                 return handle_drive(args, session)
     except BatchLockUnavailable as exc:
         return fail(args, EXIT_LOCK_BUSY, exc)
@@ -258,6 +281,36 @@ def handle_editorial_quality_worker(args: argparse.Namespace, session: Session) 
             continue
         time.sleep(max(0.0, args.interval_seconds))
     return EXIT_OPERATIONAL_FAILURE if last_failed else EXIT_SUCCESS
+
+
+def handle_visual(args: argparse.Namespace, session: Session) -> int:
+    if args.action == "status":
+        data = visual_intelligence_status(session, profile_version=args.profile_version)
+        output(args, data, visual_status_lines(data))
+        return EXIT_SUCCESS
+    if args.action == "backfill":
+        result = run_visual_intelligence_backfill(
+            session,
+            limit=args.limit,
+            batch_size=args.batch_size,
+            apply=args.apply,
+            force=args.force,
+            profile_version=args.profile_version,
+        )
+        data = result.to_dict()
+        output(args, data, visual_backfill_lines(data))
+        return EXIT_OPERATIONAL_FAILURE if data["failed"] else EXIT_SUCCESS
+    if args.action == "reprocess":
+        result = reprocess_visual_assets(
+            session,
+            args.asset_id,
+            apply=args.apply,
+            profile_version=args.profile_version,
+        )
+        data = result.to_dict()
+        output(args, data, visual_backfill_lines(data))
+        return EXIT_OPERATIONAL_FAILURE if data["failed"] else EXIT_SUCCESS
+    return EXIT_INVALID_CONFIG
 
 
 def handle_drive(args: argparse.Namespace, session: Session) -> int:
@@ -508,6 +561,10 @@ def mutating_command(args: argparse.Namespace) -> bool:
         return getattr(args, "action", None) in {"quality-backfill", "quality-worker"} and bool(
             getattr(args, "apply", False)
         )
+    if getattr(args, "resource", None) == "visual":
+        return getattr(args, "action", None) in {"backfill", "reprocess"} and bool(
+            getattr(args, "apply", False)
+        )
     if args.action == "batch":
         return bool(args.apply)
     if args.action in {"replan-reviewed", "rename-reviewed"}:
@@ -695,6 +752,31 @@ def editorial_status_lines(data: dict[str, Any]) -> list[str]:
 
 
 def editorial_backfill_lines(data: dict[str, Any]) -> list[str]:
+    return [
+        f"DRY_RUN={'YES' if data['dry_run'] else 'NO'}",
+        f"PROFILE_VERSION={data['profile_version']}",
+        f"LIMIT={data['limit'] if data['limit'] is not None else ''}",
+        f"BATCH_SIZE={data['batch_size']}",
+        f"SELECTED={data['selected']}",
+        f"PROCESSED={data['processed']}",
+        f"SKIPPED={data['skipped']}",
+        f"FAILED={data['failed']}",
+        f"REMAINING={data['remaining']}",
+    ]
+
+
+def visual_status_lines(data: dict[str, Any]) -> list[str]:
+    pipeline = data["pipeline"]
+    return [
+        f"TOTAL_CANDIDATES={data['total_candidates']}",
+        f"PROFILE_VERSION={pipeline['profile_version']}",
+        f"PROCESSED={pipeline['processed']}",
+        f"FAILED={pipeline['failed']}",
+        f"REMAINING={pipeline['remaining']}",
+    ]
+
+
+def visual_backfill_lines(data: dict[str, Any]) -> list[str]:
     return [
         f"DRY_RUN={'YES' if data['dry_run'] else 'NO'}",
         f"PROFILE_VERSION={data['profile_version']}",

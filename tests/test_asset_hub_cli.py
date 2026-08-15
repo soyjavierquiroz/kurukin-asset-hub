@@ -471,6 +471,84 @@ def test_editorial_quality_backfill_cli_passes_batch_flags(
     assert captured["force"] is True
 
 
+def test_visual_status_cli_outputs_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env_file = write_env(tmp_path)
+
+    def fake_status(_session, *, profile_version):
+        return {
+            "total_candidates": 4,
+            "pipeline": {
+                "profile_version": profile_version,
+                "processed": 3,
+                "failed": 1,
+                "remaining": 1,
+            },
+        }
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "visual_intelligence_status", fake_status)
+
+    code = asset_hub.main(["--env-file", str(env_file), "visual", "status"])
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "TOTAL_CANDIDATES=4" in output
+    assert "PROFILE_VERSION=visual-v1" in output
+    assert "FAILED=1" in output
+
+
+def test_visual_reprocess_cli_passes_asset_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_reprocess(_session, asset_ids, **kwargs):
+        captured["asset_ids"] = asset_ids
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "dry_run": not kwargs["apply"],
+                "profile_version": kwargs["profile_version"],
+                "limit": len(asset_ids),
+                "batch_size": len(asset_ids),
+                "selected": len(asset_ids),
+                "processed": len(asset_ids),
+                "skipped": 0,
+                "failed": 0,
+                "remaining": 0,
+            }
+        )
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "reprocess_visual_assets", fake_reprocess)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "visual",
+            "reprocess",
+            "--asset-id",
+            "101",
+            "--asset-id",
+            "102",
+            "--apply",
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    assert captured["asset_ids"] == [101, 102]
+    assert captured["apply"] is True
+    assert captured["profile_version"] == "visual-v1"
+
+
 def test_editorial_apply_does_not_require_pilot_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
