@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.db import Base
 from app.models import Asset, AssetAIAnalysis, Source
 from app.schemas.visual_intelligence import VISUAL_PROFILE_VERSION, VisualIntelligenceResult
+from app.services.asset_location import resolve_asset_rclone_location
 from app.services import visual_intelligence as visual
 
 
@@ -94,6 +95,103 @@ def test_collect_visual_frames_downloads_master_and_caches_frames(
     assert manifest.is_file()
 
 
+def test_resolve_asset_rclone_location_prefixes_catalog_path_with_source_root(
+    source: Source,
+) -> None:
+    source.root_path = "Javier/KURUKIN_ASSET_HUB_PILOT"
+    asset = make_asset(source, "catalog-path")
+    asset.remote_path = "10_genericos/video/lote-0001/foo.mp4"
+
+    location = resolve_asset_rclone_location(asset)
+
+    assert location.remote == "gdrive_test"
+    assert location.remote_path == "Javier/KURUKIN_ASSET_HUB_PILOT/10_genericos/video/lote-0001/foo.mp4"
+    assert location.remote_path != "10_genericos/video/lote-0001/foo.mp4"
+
+
+def test_resolve_asset_rclone_location_moved_asset_uses_current_path_not_old_source_path(
+    source: Source,
+) -> None:
+    source.root_path = "AssetHubRoot"
+    asset = make_asset(source, "moved-current")
+    asset.remote_path = "10_genericos/video/lote-0001/current.mp4"
+    asset.source_path = "00_inbox/original/current.mp4"
+    asset.status = "ready"
+    asset.move_status = "moved"
+
+    location = resolve_asset_rclone_location(asset)
+
+    assert location.remote_path == "AssetHubRoot/10_genericos/video/lote-0001/current.mp4"
+    assert "00_inbox" not in location.remote_path
+
+
+@pytest.mark.parametrize(
+    ("scope", "remote_path"),
+    [
+        ("generic", "10_genericos/video/lote-0001/foo.mp4"),
+        ("title", "30_peliculas_series/series/mi-otra-yo/video/lote-0001/foo.mp4"),
+        ("brand", "20_marcas/grandiosa-mujer/evergreen/video/lote-0001/foo.mp4"),
+    ],
+)
+def test_resolve_asset_rclone_location_supports_compact_v3_scopes(
+    source: Source,
+    scope: str,
+    remote_path: str,
+) -> None:
+    source.root_path = "AssetHubRoot"
+    asset = make_asset(source, f"{scope}-asset")
+    asset.scope = scope
+    asset.path_layout_version = "compact_v3"
+    asset.remote_path = remote_path
+
+    location = resolve_asset_rclone_location(asset)
+
+    assert location.remote_path == f"AssetHubRoot/{remote_path}"
+
+
+def test_resolve_asset_rclone_location_does_not_duplicate_physical_root(
+    source: Source,
+) -> None:
+    source.root_path = "AssetHubRoot"
+    asset = make_asset(source, "already-qualified")
+    asset.remote_path = "AssetHubRoot/10_genericos/video/lote-0001/foo.mp4"
+
+    location = resolve_asset_rclone_location(asset)
+
+    assert location.remote_path == "AssetHubRoot/10_genericos/video/lote-0001/foo.mp4"
+
+
+def test_collect_visual_frames_uses_common_asset_location_resolver(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "previews"))
+    get_settings.cache_clear()
+    source.root_path = "AssetHubRoot"
+    asset = make_asset(source, "common-resolver")
+    asset.remote_path = "10_genericos/video/lote-0001/foo.mp4"
+    session.add(asset)
+    session.commit()
+    calls: list[tuple[str, str]] = []
+
+    def fake_copyto(_self, remote: str, remote_path: str, local_path: str, timeout: int = 900):
+        calls.append((remote, remote_path))
+        Path(local_path).write_bytes(b"master")
+
+    monkeypatch.setattr(visual.RcloneService, "copyto", fake_copyto)
+    monkeypatch.setattr(
+        visual,
+        "extract_temporal_frames",
+        lambda _master, output_dir, _duration, _count: write_frames(output_dir, 10),
+    )
+
+    visual.collect_visual_frames(asset)
+
+    assert calls == [("gdrive_test", "AssetHubRoot/10_genericos/video/lote-0001/foo.mp4")]
+
+
 def test_collect_visual_frames_reuses_same_fingerprint_without_rclone(
     session: Session,
     source: Source,
@@ -127,6 +225,36 @@ def test_collect_visual_frames_reuses_same_fingerprint_without_rclone(
     assert calls == {"rclone": 1, "ffmpeg": 1}
 
 
+def test_collect_visual_frames_valid_cache_avoids_rclone_and_location_resolution(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "previews"))
+    get_settings.cache_clear()
+    asset = make_asset(source, "cache-no-rclone")
+    asset.source_hash = "hash-1"
+    session.add(asset)
+    session.commit()
+    frame_dir = visual.visual_frame_cache_dir(asset.id)
+    frames = write_frames(frame_dir, 10)
+    visual.write_visual_frame_manifest(frame_dir, VISUAL_PROFILE_VERSION, visual.source_fingerprint(asset), 11.0, frames)
+
+    def fail_copyto(*_args, **_kwargs):
+        raise AssertionError("rclone should not run for a valid frame cache")
+
+    def fail_resolver(_asset):
+        raise AssertionError("location resolution should not run for a valid frame cache")
+
+    monkeypatch.setattr(visual.RcloneService, "copyto", fail_copyto)
+    monkeypatch.setattr(visual, "resolve_asset_rclone_location", fail_resolver)
+
+    inputs = visual.collect_visual_frames(asset)
+
+    assert len(inputs.frame_paths) == 10
+
+
 def test_collect_visual_frames_regenerates_when_source_fingerprint_changes(
     session: Session,
     source: Source,
@@ -157,6 +285,39 @@ def test_collect_visual_frames_regenerates_when_source_fingerprint_changes(
     visual.collect_visual_frames(asset)
 
     assert calls["rclone"] == 2
+
+
+def test_visual_location_failure_is_operational_not_rejected_and_keeps_asset_uid(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "previews"))
+    get_settings.cache_clear()
+    source.root_path = "WrongRoot"
+    asset = make_asset(source, "wrong-root")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+
+    def fake_copyto(_self, _remote: str, remote_path: str, _local_path: str, timeout: int = 900):
+        raise RuntimeError(f"directory not found: {remote_path}")
+
+    monkeypatch.setattr(visual.RcloneService, "copyto", fake_copyto)
+
+    analyzed = visual.analyze_asset_visual_intelligence(
+        session,
+        asset.id,
+        force=True,
+        visual_caller=lambda _prompt, _frames: good_visual_result(),
+    )
+
+    analysis = latest_analysis(session, analyzed)
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["error_type"] == "operational_failure"
+    assert analyzed.editorial_status != "rejected"
+    assert analyzed.asset_uid == original_uid
 
 
 def test_visual_v2_uses_separate_frame_cache_dir(

@@ -14,6 +14,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.models import Asset, JobAssetBundle, JobAssetBundleItem
+from app.services.asset_location import (
+    AssetLocationError,
+    resolve_asset_rclone_location,
+    resolve_rclone_source_path as canonical_resolve_rclone_source_path,
+)
 from app.services.renderer_manifest import (
     build_renderer_manifest,
     ordered_bundle_items,
@@ -186,12 +191,18 @@ def materialize_bundle_item(
 ) -> None:
     asset = item.asset
     selection = item.selection_json or {}
-    remote = (
-        asset.rclone_remote
-        if asset and asset.rclone_remote
-        else selection.get("rclone_remote")
-    )
-    remote_path = asset.remote_path if asset and asset.remote_path else selection.get("remote_path")
+    remote = None
+    remote_path = None
+    if asset:
+        try:
+            location = resolve_asset_rclone_location(asset)
+        except AssetLocationError:
+            raise JobBundleMaterializationValidationError("Asset has no rclone location")
+        remote = location.remote
+        remote_path = location.remote_path
+    else:
+        remote = selection.get("rclone_remote")
+        remote_path = selection.get("remote_path")
     filename = asset.filename if asset and asset.filename else selection.get("filename")
     if not remote or not isinstance(remote, str):
         raise JobBundleMaterializationValidationError("Asset has no rclone remote")
@@ -199,10 +210,7 @@ def materialize_bundle_item(
         raise JobBundleMaterializationValidationError("Asset has no remote path")
     if not filename or not isinstance(filename, str):
         filename = Path(remote_path).name
-    source_path = resolve_rclone_source_path(
-        remote_path,
-        asset.source.root_path if asset and asset.source else None,
-    )
+    source_path = remote_path
 
     dedupe_key = str(item.asset_id or item.asset_uid or f"{remote}:{remote_path}")
     if dedupe_key in copied_assets:
@@ -243,13 +251,7 @@ def compute_sha256(path: Path | str) -> str:
 
 
 def resolve_rclone_source_path(remote_path: str, root_path: str | None) -> str:
-    clean_remote_path = remote_path.strip().strip("/")
-    clean_root_path = (root_path or "").strip().strip("/")
-    if not clean_root_path:
-        return clean_remote_path
-    if clean_remote_path == clean_root_path or clean_remote_path.startswith(f"{clean_root_path}/"):
-        return clean_remote_path
-    return f"{clean_root_path}/{clean_remote_path}"
+    return canonical_resolve_rclone_source_path(remote_path, root_path)
 
 
 def load_bundle(session: Session, bundle_uid: str) -> JobAssetBundle | None:

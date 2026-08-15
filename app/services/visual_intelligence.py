@@ -22,6 +22,7 @@ from app.schemas.visual_intelligence import (
 )
 from app.services.ai_providers.nvidia_provider import extract_json_object, post_chat_completion
 from app.services.ai_providers.openai_provider import sanitize_provider_error
+from app.services.asset_location import AssetLocationError, resolve_asset_rclone_location
 from app.services.asset_preview import parse_ffprobe_metadata, run_ffprobe, safe_asset_uid
 from app.services.rclone_service import RcloneService
 
@@ -406,12 +407,12 @@ def collect_visual_frames(asset: Asset, profile_version: str = VISUAL_PROFILE_VE
         )
 
     temp_dir.mkdir(parents=True, exist_ok=True)
-    remote = asset.rclone_remote or (asset.source.rclone_remote if asset.source else None) or get_settings().rclone_remote
-    remote_path = asset.remote_path or asset.source_path
-    if not remote or not remote_path:
-        raise VisualIntelligenceOperationalError("asset master remote path is missing")
     try:
-        RcloneService().copyto(remote, remote_path, str(master_path))
+        location = resolve_asset_rclone_location(asset)
+    except AssetLocationError as exc:
+        raise VisualIntelligenceOperationalError(str(exc)) from exc
+    try:
+        RcloneService().copyto(location.remote, location.remote_path, str(master_path))
         if not master_path.is_file() or master_path.stat().st_size <= 0:
             raise VisualIntelligenceOperationalError("asset master download failed")
 
