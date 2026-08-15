@@ -1107,6 +1107,44 @@ def test_money_printer_editorial_gate_on_returns_only_searchable(monkeypatch: py
     assert money_printer_asset_ids(result) == {"generic-ready"}
 
 
+def test_money_printer_editorial_shadow_mode_keeps_auto_select_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+        quarantined = session.scalar(select(Asset).where(Asset.asset_uid == "generic-ready"))
+        assert quarantined is not None
+        quarantined.editorial_status = "quarantined"
+        quarantined.auto_select_enabled = True
+        quarantined.search_text = "shadow editorial candidate"
+
+        disabled = session.scalar(select(Asset).where(Asset.asset_uid == "moved-status-generic"))
+        assert disabled is not None
+        disabled.editorial_status = "searchable"
+        disabled.auto_select_enabled = False
+        disabled.search_text = "shadow editorial candidate"
+
+        searchable = session.scalar(select(Asset).where(Asset.asset_uid == "generic-mirror"))
+        assert searchable is not None
+        searchable.editorial_status = "searchable"
+        searchable.auto_select_enabled = True
+        searchable.search_text = "shadow editorial candidate"
+        session.commit()
+
+    monkeypatch.setenv("ASSET_EDITORIAL_GATE_ENABLED", "false")
+    get_settings.cache_clear()
+    gate_off = post_money_printer_search(client, {"query": "shadow", "limit": 20})
+
+    assert money_printer_asset_ids(gate_off) == {"generic-ready", "generic-mirror"}
+
+    monkeypatch.setenv("ASSET_EDITORIAL_GATE_ENABLED", "true")
+    get_settings.cache_clear()
+    gate_on = post_money_printer_search(client, {"query": "shadow", "limit": 20})
+
+    assert money_printer_asset_ids(gate_on) == {"generic-mirror"}
+
+
 def test_money_printer_limit_is_respected() -> None:
     client, session_factory = make_test_client()
     with session_factory() as session:

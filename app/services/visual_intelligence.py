@@ -1272,8 +1272,6 @@ def apply_visual_intelligence_result(
     asset.editorial_reason_codes = decision.reason_codes
     asset.quality_analyzed_at = now
     asset.quality_profile_version = profile_version
-    if decision.status in {"rejected", "quarantined"}:
-        asset.auto_select_enabled = False
     asset.visual_description = result.semantics.summary_es
     asset.action_description = ", ".join(result.semantics.actions) or asset.action_description
     asset.emotion = ", ".join(result.semantics.emotions or ([result.semantics.mood] if result.semantics.mood else [])) or None

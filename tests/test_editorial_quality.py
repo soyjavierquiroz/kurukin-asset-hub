@@ -56,7 +56,7 @@ def test_vlm_json_validation_rejects_unknown_fields() -> None:
         EditorialQualityVLMResult.model_validate(payload)
 
 
-def test_hard_reject_disables_auto_select(session: Session, source: Source, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hard_reject_preserves_auto_select(session: Session, source: Source, monkeypatch: pytest.MonkeyPatch) -> None:
     asset = make_asset(source, "bad")
     session.add(asset)
     session.commit()
@@ -71,11 +71,11 @@ def test_hard_reject_disables_auto_select(session: Session, source: Source, monk
     )
 
     assert asset.editorial_status == "rejected"
-    assert asset.auto_select_enabled is False
+    assert asset.auto_select_enabled is True
     assert "subject_severely_out_of_frame" in asset.editorial_reason_codes
 
 
-def test_quarantine_disables_auto_select(session: Session, source: Source, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_quarantine_preserves_auto_select(session: Session, source: Source, monkeypatch: pytest.MonkeyPatch) -> None:
     asset = make_asset(source, "watermark")
     session.add(asset)
     session.commit()
@@ -90,7 +90,7 @@ def test_quarantine_disables_auto_select(session: Session, source: Source, monke
     )
 
     assert asset.editorial_status == "quarantined"
-    assert asset.auto_select_enabled is False
+    assert asset.auto_select_enabled is True
 
 
 def test_searchable_keeps_auto_select_state(session: Session, source: Source, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,7 +123,7 @@ def test_corrupt_asset_is_rejected_without_vlm(session: Session, source: Source)
     )
 
     assert asset.editorial_status == "rejected"
-    assert asset.auto_select_enabled is False
+    assert asset.auto_select_enabled is True
     assert "content_decode_impossible" in asset.editorial_reason_codes
 
 
@@ -264,7 +264,7 @@ def test_operational_failure_can_retry_to_quarantine(
     )
 
     assert asset.editorial_status == "quarantined"
-    assert asset.auto_select_enabled is False
+    assert asset.auto_select_enabled is True
 
 
 def test_operational_failure_can_retry_to_rejected(
@@ -291,7 +291,7 @@ def test_operational_failure_can_retry_to_rejected(
     )
 
     assert asset.editorial_status == "rejected"
-    assert asset.auto_select_enabled is False
+    assert asset.auto_select_enabled is True
 
 
 def test_quality_v1_idempotence_force_and_new_version(

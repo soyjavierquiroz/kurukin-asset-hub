@@ -526,6 +526,7 @@ def test_visual_analysis_persists_structured_json_and_updates_asset(
     assert analysis.result_json["source_fingerprint"] == visual.source_fingerprint(asset)
     assert asset.quality_score == 0.82
     assert asset.editorial_status == "searchable"
+    assert asset.auto_select_enabled is True
     assert asset.editorial_quality_score == 0.82
     assert asset.vertical_suitability_score == 0.9
     assert asset.horizontal_suitability_score == 0.55
@@ -758,7 +759,7 @@ def test_visual_garbage_hard_rejects(
     )
 
     assert asset.editorial_status == "rejected"
-    assert asset.auto_select_enabled is False
+    assert asset.auto_select_enabled is True
     assert expected_code in (asset.editorial_reason_codes or [])
 
 
@@ -782,7 +783,7 @@ def test_raw_reason_without_structured_signal_does_not_reject(
     assert asset.editorial_status == "searchable"
 
 
-def test_watermark_quarantines_and_disables_auto_select(
+def test_watermark_quarantines_and_preserves_auto_select(
     session: Session,
     source: Source,
     monkeypatch: pytest.MonkeyPatch,
@@ -800,7 +801,7 @@ def test_watermark_quarantines_and_disables_auto_select(
     )
 
     assert asset.editorial_status == "quarantined"
-    assert asset.auto_select_enabled is False
+    assert asset.auto_select_enabled is True
 
 
 def test_clean_usable_is_searchable_without_reactivating_auto_select(

@@ -477,8 +477,6 @@ def apply_editorial_quality_result(
     asset.editorial_reason_codes = decision.reason_codes
     asset.quality_profile_version = profile_version
     asset.quality_analyzed_at = now
-    if decision.status in {"rejected", "quarantined"}:
-        asset.auto_select_enabled = False
 
 
 def apply_failed_editorial_quality_result(
