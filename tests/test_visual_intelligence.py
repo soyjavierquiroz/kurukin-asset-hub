@@ -13,11 +13,11 @@ from app.config import get_settings
 from app.db import Base
 from app.models import Asset, AssetAIAnalysis, Source
 from app.schemas.visual_intelligence import VISUAL_PROFILE_VERSION, VisualIntelligenceResult
+from app.services import ai_asset_enrichment
+from app.services import visual_intelligence as visual
 from app.services.ai_providers import nvidia_provider
 from app.services.ai_providers.nvidia_provider import NvidiaProviderError
 from app.services.asset_location import resolve_asset_rclone_location
-from app.services import ai_asset_enrichment
-from app.services import visual_intelligence as visual
 
 
 @pytest.fixture()
@@ -528,33 +528,152 @@ def test_visual_provider_503_exhausted_is_retryable_operational_failure(
     assert analyzed.asset_uid == original_uid
 
 
-def test_visual_validation_error_does_not_retry(
+def test_visual_schema_validation_error_repairs_once_and_marks_ready(
     session: Session,
     source: Source,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    asset = make_asset(source, "provider-validation-no-retry")
+    asset = make_asset(source, "provider-validation-repair")
     session.add(asset)
     session.commit()
     patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    invalid = good_visual_result().model_dump(mode="json")
+    invalid["garbage"].pop("subject_severely_out_of_frame")
+    valid = good_visual_result().model_dump(mode="json")
+    prompts: list[str] = []
+
+    def schema_then_valid(prompt: str, *_args, **_kwargs):
+        prompts.append(prompt)
+        return json.dumps(invalid if len(prompts) == 1 else valid)
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("schema repair should not sleep"))
+    monkeypatch.setattr(visual, "post_chat_completion", schema_then_valid)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert len(prompts) == 2
+    assert "The previous response failed schema validation." in prompts[1]
+    assert "garbage.subject_severely_out_of_frame" in prompts[1]
+    assert analysis.result_json["status"] == "ready"
+    assert analysis.result_json["attempt_count"] == 2
+    assert analysis.result_json["final_error"] is None
+    assert analysis.result_json["visual"]["garbage"]["subject_severely_out_of_frame"] is False
+
+
+def test_visual_schema_validation_error_fails_retryable_after_one_repair_without_default(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-validation-one-repair")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    invalid = good_visual_result().model_dump(mode="json")
+    invalid["garbage"].pop("subject_severely_out_of_frame")
     calls = {"count": 0}
 
     def invalid_payload(*_args, **_kwargs):
         calls["count"] += 1
-        return "{}"
+        return json.dumps(invalid)
 
     monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
     get_settings.cache_clear()
-    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("validation should not retry"))
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("schema repair should not sleep"))
     monkeypatch.setattr(visual, "post_chat_completion", invalid_payload)
 
     analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
 
     analysis = latest_analysis(session, analyzed)
-    assert calls["count"] == 1
+    assert calls["count"] == 2
     assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["error_type"] == "operational_failure"
+    assert analysis.result_json["retryable"] is True
+    assert analysis.result_json["attempt_count"] == 2
+    assert "garbage.subject_severely_out_of_frame" in analysis.result_json["final_error"]
+    assert "visual" not in analysis.result_json
+    assert analyzed.editorial_status != "rejected"
+    assert analyzed.asset_uid == original_uid
+
+
+def test_visual_valid_payload_first_try_uses_single_inference(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-validation-single")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def valid_payload(*_args, **_kwargs):
+        calls["count"] += 1
+        return good_visual_result().model_dump_json()
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual, "post_chat_completion", valid_payload)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 1
+    assert analysis.result_json["status"] == "ready"
     assert analysis.result_json["attempt_count"] == 1
+
+
+def test_visual_schema_repair_reuses_cached_contact_sheet_without_rclone_or_ffmpeg(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "previews"))
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    asset = make_asset(source, "schema-repair-cache")
+    session.add(asset)
+    session.commit()
+    frame_dir = tmp_path / "previews" / str(asset.id) / "visual-v1-frames"
+    frames = write_frames(frame_dir, 10)
+    visual.write_visual_frame_manifest(frame_dir, VISUAL_PROFILE_VERSION, visual.source_fingerprint(asset), 11.0, frames)
+    contact_sheet = visual.ensure_visual_contact_sheet(frames, frame_dir)
+    invalid = good_visual_result().model_dump(mode="json")
+    invalid["garbage"].pop("subject_severely_out_of_frame")
+    payloads = [invalid, good_visual_result().model_dump(mode="json")]
+    image_path_calls: list[list[Path]] = []
+
+    monkeypatch.setattr(
+        visual.RcloneService,
+        "copyto",
+        lambda *_args, **_kwargs: pytest.fail("rclone should not run for cached schema repair"),
+    )
+    monkeypatch.setattr(
+        visual,
+        "extract_temporal_frames",
+        lambda *_args, **_kwargs: pytest.fail("ffmpeg should not run for cached schema repair"),
+    )
+
+    def schema_then_valid(_prompt: str, image_paths: list[Path], *_args, **_kwargs):
+        image_path_calls.append(image_paths)
+        return json.dumps(payloads[len(image_path_calls) - 1])
+
+    monkeypatch.setattr(visual, "post_chat_completion", schema_then_valid)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert analysis.result_json["status"] == "ready"
+    assert analysis.result_json["attempt_count"] == 2
+    assert image_path_calls == [[contact_sheet], [contact_sheet]]
 
 
 def test_visual_provider_401_does_not_retry(
@@ -1813,6 +1932,53 @@ def test_visual_payload_complete_asset_validates_with_visible_text_list() -> Non
     assert warnings == ["semantics.visible_text_list_normalized"]
 
 
+def test_visual_payload_safe_text_areas_none_string_normalizes_to_empty() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["composition"]["safe_text_areas"] = "none"
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.composition.safe_text_areas == []
+    assert warnings == ["composition.safe_text_areas_string_normalized"]
+
+
+def test_visual_payload_safe_text_areas_string_normalizes_to_single_item() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["composition"]["safe_text_areas"] = " center "
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.composition.safe_text_areas == ["center"]
+    assert warnings == ["composition.safe_text_areas_string_normalized"]
+
+
+def test_visual_payload_pan_safe_directions_maps_top_bottom_to_up_down() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["transforms"]["pan"]["safe_directions"] = ["top", "bottom"]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.transforms.pan.safe_directions == ["up", "down"]
+    assert warnings == ["transforms.pan.safe_directions_normalized"]
+
+
+def test_visual_payload_pan_safe_directions_drops_unknown_with_warning() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["transforms"]["pan"]["safe_directions"] = ["left", "diagonal", "LEFT", "bottom"]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.transforms.pan.safe_directions == ["left", "down"]
+    assert warnings == [
+        "transforms.pan.safe_directions_normalized",
+        "transforms.pan.safe_directions_unknown_dropped",
+    ]
+
+
 def test_visual_payload_normalized_visible_text_list_still_blocks_flip(source: Source) -> None:
     payload = good_visual_result(
         flip_allowed=True,
@@ -1963,7 +2129,7 @@ def test_visual_payload_core_malformed_quality_score_still_fails() -> None:
     normalized, warnings = visual.normalize_visual_payload(payload)
 
     assert warnings == []
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         VisualIntelligenceResult.model_validate(normalized)
 
 
@@ -1987,7 +2153,7 @@ def test_call_nvidia_visual_intelligence_records_normalization_warnings(
     assert result.composition.subject_trajectory == []
     assert result.transforms.crop_vertical.safe_rect is None
     assert result.transforms.pan.max_offset_x is None
-    assert getattr(result, "_normalization_warnings") == [
+    assert result._normalization_warnings == [
         "composition.subject_region_dropped",
         "composition.subject_trajectory_invalid_items_dropped",
         "transforms.pan.max_offset_x_dropped",

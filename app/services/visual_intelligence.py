@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
+from pydantic import ValidationError
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -27,7 +28,11 @@ from app.schemas.visual_intelligence import (
     VISUAL_PROFILE_VERSION,
     VisualIntelligenceResult,
 )
-from app.services.ai_providers.nvidia_provider import NvidiaProviderError, extract_json_object, post_chat_completion
+from app.services.ai_providers.nvidia_provider import (
+    NvidiaProviderError,
+    extract_json_object,
+    post_chat_completion,
+)
 from app.services.ai_providers.openai_provider import sanitize_provider_error
 from app.services.asset_location import AssetLocationError, resolve_asset_rclone_location
 from app.services.asset_preview import parse_ffprobe_metadata, run_ffprobe, safe_asset_uid
@@ -722,7 +727,51 @@ def call_nvidia_visual_intelligence(
     if not settings.nvidia_api_key:
         raise VisualIntelligenceOperationalError("NVIDIA_API_KEY is not configured")
     attempt_count = 0
+    text, attempt_count = post_visual_completion_with_retries(prompt, image_paths, settings, attempt_count)
+    try:
+        result, normalization_warnings = validate_visual_payload_text(text)
+    except ValidationError as exc:
+        repair_prompt = (
+            prompt
+            + "\n\nThe previous response failed schema validation.\n"
+            + "Return the COMPLETE JSON object again.\n"
+            + "Do not omit required fields.\n"
+            + "Validation problems:\n"
+            + summarize_pydantic_errors(exc)
+        )
+        try:
+            text, attempt_count = post_visual_completion_with_retries(
+                repair_prompt,
+                image_paths,
+                settings,
+                attempt_count,
+            )
+            result, normalization_warnings = validate_visual_payload_text(text)
+        except ValidationError as repair_exc:
+            error = VisualIntelligenceOperationalError("NVIDIA returned visual-v1 JSON that failed schema validation")
+            object.__setattr__(error, "_visual_attempt_count", attempt_count)
+            object.__setattr__(error, "_visual_final_error", summarize_pydantic_errors(repair_exc))
+            object.__setattr__(error, "_visual_retryable", True)
+            raise error from repair_exc
+        except Exception as repair_exc:
+            raise VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON") from repair_exc
+    except Exception as exc:
+        raise VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON") from exc
+    object.__setattr__(result, "_normalization_warnings", normalization_warnings)
+    object.__setattr__(result, "_attempt_count", attempt_count)
+    object.__setattr__(result, "_final_error", None)
+    return result
+
+
+def post_visual_completion_with_retries(
+    prompt: str,
+    image_paths: list[Path],
+    settings: Any,
+    attempt_count: int,
+) -> tuple[str, int]:
+    phase_attempt_count = 0
     while True:
+        phase_attempt_count += 1
         attempt_count += 1
         try:
             text = post_chat_completion(
@@ -732,24 +781,32 @@ def call_nvidia_visual_intelligence(
                 timeout_seconds=90.0,
                 max_tokens=VISUAL_V1_NVIDIA_MAX_TOKENS,
             )
-            break
+            return text, attempt_count
         except NvidiaProviderError as exc:
-            if attempt_count > len(VISUAL_NVIDIA_RETRY_DELAYS) or not is_transient_nvidia_error(exc):
+            if phase_attempt_count > len(VISUAL_NVIDIA_RETRY_DELAYS) or not is_transient_nvidia_error(exc):
                 object.__setattr__(exc, "_visual_attempt_count", attempt_count)
                 object.__setattr__(exc, "_visual_final_error", sanitize_provider_error(str(exc)))
                 raise
-            delay = VISUAL_NVIDIA_RETRY_DELAYS[attempt_count - 1]
+            delay = VISUAL_NVIDIA_RETRY_DELAYS[phase_attempt_count - 1]
             time.sleep(random.uniform(delay * 0.8, delay * 1.2))
-    try:
-        payload = json.loads(extract_json_object(text))
-        payload, normalization_warnings = normalize_visual_payload(payload)
-    except Exception as exc:
-        raise VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON") from exc
-    result = VisualIntelligenceResult.model_validate(payload)
-    object.__setattr__(result, "_normalization_warnings", normalization_warnings)
-    object.__setattr__(result, "_attempt_count", attempt_count)
-    object.__setattr__(result, "_final_error", None)
-    return result
+
+
+def validate_visual_payload_text(text: str) -> tuple[VisualIntelligenceResult, list[str]]:
+    payload = json.loads(extract_json_object(text))
+    payload, normalization_warnings = normalize_visual_payload(payload)
+    return VisualIntelligenceResult.model_validate(payload), normalization_warnings
+
+
+def summarize_pydantic_errors(exc: ValidationError, *, limit: int = 6) -> str:
+    problems: list[str] = []
+    for error in exc.errors()[:limit]:
+        loc = ".".join(str(part) for part in error.get("loc", ())) or "<root>"
+        message = str(error.get("msg") or error.get("type") or "validation error")
+        problems.append(f"- {loc}: {message}")
+    remaining = len(exc.errors()) - len(problems)
+    if remaining > 0:
+        problems.append(f"- ... {remaining} more validation problem(s)")
+    return "\n".join(problems)
 
 
 def is_transient_nvidia_error(exc: NvidiaProviderError) -> bool:
@@ -795,6 +852,30 @@ def normalize_visual_payload(payload: Any) -> tuple[Any, list[str]]:
 
     composition = normalized.get("composition")
     if isinstance(composition, dict):
+        if "safe_text_areas" in composition:
+            safe_text_areas = composition.get("safe_text_areas")
+            clean_safe_text_areas: list[str] = []
+            if safe_text_areas is None:
+                composition["safe_text_areas"] = []
+            elif isinstance(safe_text_areas, str):
+                clean_area = safe_text_areas.strip()
+                composition["safe_text_areas"] = (
+                    [] if clean_area.lower() == "none" else ([clean_area] if clean_area else [])
+                )
+                warnings.append("composition.safe_text_areas_string_normalized")
+            elif isinstance(safe_text_areas, list):
+                valid_safe_text_areas = {"top", "middle", "bottom", "left", "right", "center", "none"}
+                seen_areas: set[str] = set()
+                for item in safe_text_areas:
+                    if not isinstance(item, str):
+                        continue
+                    clean_area = item.strip()
+                    if clean_area not in valid_safe_text_areas or clean_area in seen_areas:
+                        continue
+                    clean_safe_text_areas.append(clean_area)
+                    seen_areas.add(clean_area)
+                composition["safe_text_areas"] = clean_safe_text_areas
+
         subject_region = composition.get("subject_region")
         if subject_region is not None:
             clean_region = normalized_float_list(subject_region, 4)
@@ -830,6 +911,34 @@ def normalize_visual_payload(payload: Any) -> tuple[Any, list[str]]:
                 zoom["max_safe_zoom"] = clean_zoom
         pan = transforms.get("pan")
         if isinstance(pan, dict):
+            if isinstance(pan.get("safe_directions"), list):
+                direction_mapping = {
+                    "top": "up",
+                    "bottom": "down",
+                    "left": "left",
+                    "right": "right",
+                    "up": "up",
+                    "down": "down",
+                }
+                clean_directions: list[str] = []
+                seen_directions: set[str] = set()
+                dropped_unknown_direction = False
+                for item in pan["safe_directions"]:
+                    if not isinstance(item, str):
+                        dropped_unknown_direction = True
+                        continue
+                    mapped = direction_mapping.get(item.strip().lower())
+                    if mapped is None:
+                        dropped_unknown_direction = True
+                        continue
+                    if mapped not in seen_directions:
+                        clean_directions.append(mapped)
+                        seen_directions.add(mapped)
+                if clean_directions != pan["safe_directions"]:
+                    warnings.append("transforms.pan.safe_directions_normalized")
+                if dropped_unknown_direction:
+                    warnings.append("transforms.pan.safe_directions_unknown_dropped")
+                pan["safe_directions"] = clean_directions
             for key in ("max_offset_x", "max_offset_y"):
                 if key in pan and pan[key] is not None:
                     clean_offset = normalized_float(pan[key], minimum=0.0, maximum=1.0)
@@ -1505,7 +1614,11 @@ def apply_failed_visual_intelligence_result(
                 "source_fingerprint": source_fingerprint(asset),
                 "error": sanitize_provider_error(str(exc)),
                 "error_type": "operational_failure",
-                "retryable": is_transient_nvidia_error(exc) if isinstance(exc, NvidiaProviderError) else False,
+                "retryable": getattr(
+                    exc,
+                    "_visual_retryable",
+                    is_transient_nvidia_error(exc) if isinstance(exc, NvidiaProviderError) else False,
+                ),
                 "attempt_count": getattr(exc, "_visual_attempt_count", 1),
                 "final_error": getattr(exc, "_visual_final_error", sanitize_provider_error(str(exc))),
             },

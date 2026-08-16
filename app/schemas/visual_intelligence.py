@@ -9,7 +9,7 @@ VISUAL_PROFILE_VERSION = "visual-v1"
 VISUAL_FRAME_COUNT = 10
 
 QualityLabel = Literal["excellent", "good", "usable", "weak", "bad"]
-SafeArea = Literal["top", "middle", "bottom", "left", "right", "none"]
+SafeArea = Literal["top", "middle", "bottom", "left", "right", "center", "none"]
 PanDirection = Literal["left", "right", "up", "down"]
 AspectRatio = Literal["9:16", "16:9", "1:1", "4:5"]
 CameraMotion = Literal[
