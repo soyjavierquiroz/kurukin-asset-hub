@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ from app.models import (
 from app.services.asset_search import normalize_search_text, score_asset_for_query, tokenize_query
 
 API_HEADERS = {"X-Asset-Hub-Api-Key": "test-api-key"}
+JPEG_BYTES = b"\xff\xd8\xff\xe0real-thumbnail\xff\xd9"
 
 
 def make_test_client() -> tuple[TestClient, sessionmaker[Session]]:
@@ -847,6 +849,131 @@ def money_printer_asset_ids(response_json: dict[str, object]) -> set[str]:
     return {asset["asset_id"] for asset in assets}
 
 
+def seed_preview_api_asset(
+    session: Session,
+    *,
+    uid: str = "preview-api-asset",
+    thumbnail_path: str | None = "pilot-previews/preview-api-asset/thumbnail.jpg",
+) -> Asset:
+    source = Source(source_id=f"source-{uid}", provider="google_drive", label="Managed Drive")
+    session.add(source)
+    session.flush()
+    asset = make_money_printer_asset(
+        source,
+        uid=uid,
+        filename=f"{uid}.mp4",
+        scope="generic",
+        search_text=f"{uid} telefono",
+    )
+    asset.thumbnail_path = thumbnail_path
+    session.add(asset)
+    session.commit()
+    return asset
+
+
+def write_preview_thumbnail(pilot_root: Path, relative_path: str) -> Path:
+    path = pilot_root / relative_path.removeprefix("pilot-previews/")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(JPEG_BYTES)
+    return path
+
+
+def test_asset_preview_endpoint_serves_thumbnail_with_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pilot_root = tmp_path / "pilot"
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(pilot_root))
+    get_settings.cache_clear()
+    thumbnail_path = "pilot-previews/preview-api-asset/thumbnail.jpg"
+    write_preview_thumbnail(pilot_root, thumbnail_path)
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_preview_api_asset(session, thumbnail_path=thumbnail_path)
+
+    response = client.get("/api/assets/preview-api-asset/preview", headers=API_HEADERS)
+
+    assert response.status_code == 200
+    assert response.content == JPEG_BYTES
+    assert response.headers["content-type"] == "image/jpeg"
+
+
+def test_asset_preview_endpoint_requires_api_key() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_preview_api_asset(session)
+
+    response = client.get("/api/assets/preview-api-asset/preview")
+
+    assert response.status_code == 401
+
+
+def test_asset_preview_endpoint_rejects_invalid_api_key() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_preview_api_asset(session)
+
+    response = client.get(
+        "/api/assets/preview-api-asset/preview",
+        headers={"X-Asset-Hub-Api-Key": "wrong"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_asset_preview_endpoint_returns_404_for_unknown_asset_uid() -> None:
+    client, _session_factory = make_test_client()
+
+    response = client.get("/api/assets/missing-asset/preview", headers=API_HEADERS)
+
+    assert response.status_code == 404
+
+
+def test_asset_preview_endpoint_returns_404_without_thumbnail_path() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_preview_api_asset(session, thumbnail_path=None)
+
+    response = client.get("/api/assets/preview-api-asset/preview", headers=API_HEADERS)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preview not found"
+
+
+def test_asset_preview_endpoint_returns_404_when_thumbnail_file_missing() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_preview_api_asset(session)
+
+    response = client.get("/api/assets/preview-api-asset/preview", headers=API_HEADERS)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preview not found"
+
+
+def test_asset_preview_endpoint_uses_asset_uid_not_numeric_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pilot_root = tmp_path / "pilot"
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(pilot_root))
+    get_settings.cache_clear()
+    thumbnail_path = "pilot-previews/canonical-preview-uid/thumbnail.jpg"
+    write_preview_thumbnail(pilot_root, thumbnail_path)
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        asset = seed_preview_api_asset(
+            session,
+            uid="canonical-preview-uid",
+            thumbnail_path=thumbnail_path,
+        )
+        numeric_id = asset.id
+
+    response = client.get(f"/api/assets/{numeric_id}/preview", headers=API_HEADERS)
+
+    assert response.status_code == 404
+
+
 def test_money_printer_default_returns_only_generic() -> None:
     client, session_factory = make_test_client()
     with session_factory() as session:
@@ -858,6 +985,59 @@ def test_money_printer_default_returns_only_generic() -> None:
     for asset in result["assets"]:
         assert asset["asset_id"] == asset["asset_uid"]
     assert result["source_policy"] == {"sources": [{"scope": "generic", "brand": None, "title": None}]}
+
+
+def test_money_printer_search_includes_authenticated_thumbnail_preview_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pilot_root = tmp_path / "pilot"
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(pilot_root))
+    get_settings.cache_clear()
+    thumbnail_path = "pilot-previews/generic-ready/thumbnail.jpg"
+    write_preview_thumbnail(pilot_root, thumbnail_path)
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+        asset = session.scalar(select(Asset).where(Asset.asset_uid == "generic-ready"))
+        assert asset is not None
+        asset.thumbnail_path = thumbnail_path
+        session.commit()
+
+    result = post_money_printer_search(client, {"query": "generic", "limit": 1})
+    asset_json = result["assets"][0]
+
+    assert asset_json["preview_url"] == "/api/assets/generic-ready/preview"
+    assert {
+        "asset_id",
+        "asset_uid",
+        "drive_file_id",
+        "scope",
+        "brand",
+        "collection",
+        "title_type",
+        "title",
+        "title_context",
+        "filename",
+        "target_path",
+        "media_type",
+        "orientation",
+        "primary_theme",
+        "primary_topic",
+        "tags",
+    }.issubset(asset_json.keys())
+    assert str(tmp_path) not in str(result)
+    assert "pilot-previews/generic-ready/thumbnail.jpg" not in str(result)
+
+
+def test_money_printer_search_preview_url_is_null_without_thumbnail() -> None:
+    client, session_factory = make_test_client()
+    with session_factory() as session:
+        seed_money_printer_assets(session)
+
+    result = post_money_printer_search(client, {"query": "generic", "limit": 1})
+
+    assert result["assets"][0]["preview_url"] is None
 
 
 def test_money_printer_strict_brand_does_not_mix_generic() -> None:

@@ -2,6 +2,7 @@ import secrets
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import String, and_, cast, exists, false, func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -12,7 +13,7 @@ from app.models import Asset, AssetAIAnalysis, AssetAllowedBrand, AssetKeyword, 
 from app.models.asset import ORIENTATION_VALUES, USAGE_SCOPE_VALUES
 from app.schemas.asset_selection import AssetSelectionRequest, AssetSelectionResponse
 from app.services.ai_asset_enrichment import enrich_asset_with_ai
-from app.services.asset_preview import preview_public_url
+from app.services.asset_preview import local_preview_file, preview_public_url
 from app.services.asset_policy import is_asset_eligible_for_search, resolve_asset_search_policy
 from app.services.asset_search import asset_matches_people_query, score_asset_for_query, tokenize_query
 from app.services.asset_selection import select_assets
@@ -325,6 +326,21 @@ def api_select_assets(
     return select_assets(session, request)
 
 
+@router.get("/{asset_uid}/preview")
+def asset_thumbnail_preview(
+    asset_uid: str,
+    _: Annotated[None, Depends(require_asset_hub_api_key)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> FileResponse:
+    asset = session.scalar(select(Asset).where(Asset.asset_uid == asset_uid))
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    path = local_preview_file(asset.thumbnail_path)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
 @router.post("/{asset_id}/ai-enrich")
 def api_enrich_asset_with_ai(
     asset_id: int,
@@ -426,6 +442,15 @@ def allowed_brand_exists(brand: Brand):
     )
 
 
+def asset_thumbnail_preview_url(asset: Asset) -> str | None:
+    if not asset.thumbnail_path:
+        return None
+    path = local_preview_file(asset.thumbnail_path)
+    if path is None or not path.is_file():
+        return None
+    return f"/api/assets/{asset.asset_uid}/preview"
+
+
 def serialize_money_printer_asset(asset: Asset) -> dict[str, Any]:
     return {
         "asset_id": asset.asset_uid,
@@ -444,6 +469,7 @@ def serialize_money_printer_asset(asset: Asset) -> dict[str, Any]:
         "primary_theme": asset.primary_theme,
         "primary_topic": asset.primary_topic,
         "tags": [tag.tag for tag in asset.tags],
+        "preview_url": asset_thumbnail_preview_url(asset),
     }
 
 
