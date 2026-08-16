@@ -1299,24 +1299,24 @@ def build_visual_intelligence_prompt(
         '    "reason_codes": []\n'
         "  },\n"
         '  "garbage": {\n'
-        '    "is_garbage": false,\n'
-        '    "score": 0.0,\n'
-        '    "black_or_blank": false,\n'
-        '    "subject_severely_out_of_frame": false,\n'
-        '    "subject_badly_clipped": false,\n'
-        '    "social_media_ui": false,\n'
-        '    "subscribe_cta": false,\n'
-        '    "emoji_overlay": false,\n'
-        '    "watermark": false,\n'
-        '    "logo": false,\n'
-        '    "heavy_text_overlay": false,\n'
-        '    "nearly_empty": false,\n'
-        '    "severe_blur": false,\n'
-        '    "severe_black_frames": false,\n'
-        '    "corrupted_frames": false,\n'
-        '    "accidental_capture": false,\n'
-        '    "editorial_usable": true,\n'
-        '    "reasons": []\n'
+        '    "is_garbage": REQUIRED_BOOLEAN,\n'
+        '    "score": REQUIRED_FLOAT_0_TO_1,\n'
+        '    "black_or_blank": REQUIRED_BOOLEAN,\n'
+        '    "subject_severely_out_of_frame": REQUIRED_BOOLEAN,\n'
+        '    "subject_badly_clipped": REQUIRED_BOOLEAN,\n'
+        '    "social_media_ui": REQUIRED_BOOLEAN,\n'
+        '    "subscribe_cta": REQUIRED_BOOLEAN,\n'
+        '    "emoji_overlay": REQUIRED_BOOLEAN,\n'
+        '    "watermark": REQUIRED_BOOLEAN,\n'
+        '    "logo": REQUIRED_BOOLEAN,\n'
+        '    "heavy_text_overlay": REQUIRED_BOOLEAN,\n'
+        '    "nearly_empty": REQUIRED_BOOLEAN,\n'
+        '    "severe_blur": REQUIRED_BOOLEAN,\n'
+        '    "severe_black_frames": REQUIRED_BOOLEAN,\n'
+        '    "corrupted_frames": REQUIRED_BOOLEAN,\n'
+        '    "accidental_capture": REQUIRED_BOOLEAN,\n'
+        '    "editorial_usable": REQUIRED_BOOLEAN,\n'
+        '    "reasons": REQUIRED_ARRAY_OF_REASON_CODES\n'
         "  },\n"
         '  "semantics": {\n'
         '    "summary_es": "",\n'
@@ -1362,7 +1362,19 @@ def build_visual_intelligence_prompt(
         "}\n\n"
         "Reglas de calculo:\n"
         "- quality.score combina nitidez, exposicion, estabilidad, iluminacion y consistencia temporal.\n"
+        "- EVALUA CADA CAMPO DEL BLOQUE GARBAGE DE FORMA INDEPENDIENTE.\n"
+        "- No copies valores por defecto: cada flag garbage es REQUIRED true/false segun evidencia del contact sheet.\n"
+        "- garbage.score es REQUIRED float real 0.0..1.0. Usa 0.0 solamente si realmente no existe ninguna senal editorial problematica.\n"
         "- garbage.score mide probabilidad de asset inutil: negro, corrupto, borroso extremo o captura accidental.\n"
+        "- garbage.editorial_usable es REQUIRED y debe ser una evaluacion real; no asumas true.\n"
+        "- visible_text por si solo NO es garbage: texto natural en camiseta, libro, senal, calendario, letrero o packaging puede ser usable.\n"
+        "- garbage.heavy_text_overlay=true solo cuando texto/grafica domina, obstruye o contamina editorialmente el plano.\n"
+        "- garbage.logo=true solo si hay un logo visible real.\n"
+        "- garbage.watermark=true solo si hay marca de agua o branding overlay persistente.\n"
+        "- garbage.social_media_ui=true solo si hay UI real TikTok, Instagram, YouTube u otra plataforma.\n"
+        "- garbage.subscribe_cta=true solo si hay CTA visible real.\n"
+        "- garbage.subject_badly_clipped=true solo para clipping severo, no framing normal.\n"
+        "- garbage.accidental_capture=true solo para captura claramente accidental o inservible.\n"
         "- semantics resume sujeto, accion, entorno, mood, texto visible, logos y keywords buscables.\n"
         "- semantics.visible_text debe ser un unico string con todo el texto legible relevante o null. "
         "Si hay varios textos, unelos en ese string; nunca devuelvas array.\n"

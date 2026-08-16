@@ -45,22 +45,22 @@ class VisualGarbageSignals(BaseModel):
 
     is_garbage: bool
     score: float = Field(ge=0.0, le=1.0)
-    black_or_blank: bool = False
-    subject_severely_out_of_frame: bool = False
-    subject_badly_clipped: bool = False
-    social_media_ui: bool = False
-    subscribe_cta: bool = False
-    emoji_overlay: bool = False
-    watermark: bool = False
-    logo: bool = False
-    heavy_text_overlay: bool = False
-    nearly_empty: bool = False
-    severe_blur: bool = False
-    severe_black_frames: bool = False
-    corrupted_frames: bool = False
-    accidental_capture: bool = False
-    editorial_usable: bool = True
-    reasons: list[str] = Field(default_factory=list)
+    black_or_blank: bool
+    subject_severely_out_of_frame: bool
+    subject_badly_clipped: bool
+    social_media_ui: bool
+    subscribe_cta: bool
+    emoji_overlay: bool
+    watermark: bool
+    logo: bool
+    heavy_text_overlay: bool
+    nearly_empty: bool
+    severe_blur: bool
+    severe_black_frames: bool
+    corrupted_frames: bool
+    accidental_capture: bool
+    editorial_usable: bool
+    reasons: list[str]
 
 
 class VisualSemanticSignals(BaseModel):

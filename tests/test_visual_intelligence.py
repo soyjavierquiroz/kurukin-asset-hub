@@ -1104,6 +1104,172 @@ def test_visual_intelligence_prompt_does_not_anchor_transform_confidence(source:
     assert "camara estatica y margen suficiente son evidencia favorable" in prompt
 
 
+def test_visual_intelligence_prompt_does_not_anchor_clean_garbage_block(source: Source) -> None:
+    prompt = visual.build_visual_intelligence_prompt(make_asset(source, "prompt-garbage"), [1.0])
+    garbage_block = prompt[prompt.index('  "garbage": {') : prompt.index('  "semantics": {')]
+
+    assert '"score": 0.0' not in garbage_block
+    assert '"is_garbage": false' not in garbage_block
+    assert '"editorial_usable": true' not in garbage_block
+    assert '"reasons": []' not in garbage_block
+    assert '"score": REQUIRED_FLOAT_0_TO_1' in garbage_block
+    assert '"is_garbage": REQUIRED_BOOLEAN' in garbage_block
+    assert "EVALUA CADA CAMPO DEL BLOQUE GARBAGE DE FORMA INDEPENDIENTE" in prompt
+    assert "No copies valores por defecto" in prompt
+
+
+def test_visual_garbage_missing_score_validation_error() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"].pop("score")
+
+    with pytest.raises(ValidationError):
+        VisualIntelligenceResult.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "is_garbage",
+        "black_or_blank",
+        "subject_severely_out_of_frame",
+        "subject_badly_clipped",
+        "social_media_ui",
+        "subscribe_cta",
+        "emoji_overlay",
+        "watermark",
+        "logo",
+        "heavy_text_overlay",
+        "nearly_empty",
+        "severe_blur",
+        "severe_black_frames",
+        "corrupted_frames",
+        "accidental_capture",
+    ],
+)
+def test_visual_garbage_missing_evaluated_boolean_validation_error(field: str) -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"].pop(field)
+
+    with pytest.raises(ValidationError):
+        VisualIntelligenceResult.model_validate(payload)
+
+
+def test_visual_garbage_missing_editorial_usable_validation_error() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"].pop("editorial_usable")
+
+    with pytest.raises(ValidationError):
+        VisualIntelligenceResult.model_validate(payload)
+
+
+def test_visual_garbage_missing_reasons_validation_error() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"].pop("reasons")
+
+    with pytest.raises(ValidationError):
+        VisualIntelligenceResult.model_validate(payload)
+
+
+def test_visual_garbage_explicit_clean_zero_score_is_valid() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"].update(
+        {
+            "score": 0.0,
+            "is_garbage": False,
+            "black_or_blank": False,
+            "subject_severely_out_of_frame": False,
+            "subject_badly_clipped": False,
+            "social_media_ui": False,
+            "subscribe_cta": False,
+            "emoji_overlay": False,
+            "watermark": False,
+            "logo": False,
+            "heavy_text_overlay": False,
+            "nearly_empty": False,
+            "severe_blur": False,
+            "severe_black_frames": False,
+            "corrupted_frames": False,
+            "accidental_capture": False,
+            "editorial_usable": True,
+            "reasons": [],
+        }
+    )
+
+    result = VisualIntelligenceResult.model_validate(payload)
+
+    assert result.garbage.score == 0.0
+    assert result.garbage.is_garbage is False
+    assert result.garbage.editorial_usable is True
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "heavy_text_overlay",
+        "logo",
+        "watermark",
+        "social_media_ui",
+        "subject_badly_clipped",
+    ],
+)
+def test_visual_garbage_true_flags_are_preserved(field: str) -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"][field] = True
+
+    result = VisualIntelligenceResult.model_validate(payload)
+
+    assert getattr(result.garbage, field) is True
+
+
+def test_visual_garbage_editorial_usable_false_is_preserved() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"]["editorial_usable"] = False
+
+    result = VisualIntelligenceResult.model_validate(payload)
+
+    assert result.garbage.editorial_usable is False
+
+
+def test_visual_payload_normalizer_does_not_invent_garbage_score() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["garbage"].pop("score")
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+
+    assert "score" not in normalized["garbage"]
+    assert warnings == []
+    with pytest.raises(ValidationError):
+        VisualIntelligenceResult.model_validate(normalized)
+
+
+def test_visible_text_delivery_without_garbage_can_still_be_searchable(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "delivery-text")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    payload = good_visual_result(visible_text="DELIVERY").model_dump(mode="json")
+    payload["garbage"]["score"] = 0.0
+    payload["garbage"]["heavy_text_overlay"] = False
+    payload["garbage"]["social_media_ui"] = False
+    payload["garbage"]["watermark"] = False
+    payload["garbage"]["logo"] = False
+    payload["garbage"]["editorial_usable"] = True
+
+    visual.analyze_asset_visual_intelligence(
+        session,
+        asset.id,
+        visual_caller=lambda _prompt, _frames: VisualIntelligenceResult.model_validate(payload),
+    )
+
+    assert asset.visible_text == "DELIVERY"
+    assert asset.editorial_status == "searchable"
+
+
 def test_edge_subject_blocks_zoom(
     session: Session,
     source: Source,
