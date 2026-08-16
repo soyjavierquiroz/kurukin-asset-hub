@@ -91,9 +91,13 @@ class VisualBackfillResult:
     skipped: int
     failed: int
     remaining: int
+    title_slug: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return self.__dict__.copy()
+        data = self.__dict__.copy()
+        if data["title_slug"] is None:
+            data.pop("title_slug")
+        return data
 
 
 VisualCaller = Callable[[str, list[Path]], VisualIntelligenceResult]
@@ -235,6 +239,7 @@ def run_visual_intelligence_backfill(
     batch_size: int = 20,
     apply: bool = False,
     force: bool = False,
+    title_slug: str | None = None,
     profile_version: str = VISUAL_PROFILE_VERSION,
     visual_caller: VisualCaller | None = None,
 ) -> VisualBackfillResult:
@@ -251,6 +256,7 @@ def run_visual_intelligence_backfill(
                 session,
                 limit=current_limit + len(seen_asset_ids),
                 force=force,
+                title_slug=title_slug,
                 profile_version=profile_version,
             )
             if asset_id not in seen_asset_ids
@@ -296,7 +302,13 @@ def run_visual_intelligence_backfill(
         processed=processed,
         skipped=skipped,
         failed=failed,
-        remaining=count_remaining_visual_assets(session, profile_version=profile_version, force=False),
+        remaining=count_remaining_visual_assets(
+            session,
+            profile_version=profile_version,
+            force=False,
+            title_slug=title_slug,
+        ),
+        title_slug=title_slug,
     )
 
 
@@ -383,9 +395,13 @@ def select_visual_candidate_ids(
     *,
     limit: int,
     force: bool = False,
+    title_slug: str | None = None,
     profile_version: str = VISUAL_PROFILE_VERSION,
 ) -> list[int]:
-    query = select(Asset.id).where(visual_candidate_filter()).order_by(Asset.id.asc()).limit(limit)
+    query = select(Asset.id).where(visual_candidate_filter())
+    if title_slug is not None:
+        query = query.where(Asset.title_slug == title_slug)
+    query = query.order_by(Asset.id.asc()).limit(limit)
     if not force:
         latest_analysis_ids = latest_visual_analysis_ids(profile_version)
         current_assets = (
@@ -407,8 +423,11 @@ def count_remaining_visual_assets(
     *,
     profile_version: str = VISUAL_PROFILE_VERSION,
     force: bool = False,
+    title_slug: str | None = None,
 ) -> int:
     query = select(func.count()).select_from(Asset).where(visual_candidate_filter())
+    if title_slug is not None:
+        query = query.where(Asset.title_slug == title_slug)
     if not force:
         latest_analysis_ids = latest_visual_analysis_ids(profile_version)
         current_assets = (

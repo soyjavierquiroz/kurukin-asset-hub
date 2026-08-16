@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -499,6 +500,100 @@ def test_visual_status_cli_outputs_counts(
     assert "TOTAL_CANDIDATES=4" in output
     assert "PROFILE_VERSION=visual-v1" in output
     assert "FAILED=1" in output
+
+
+def test_visual_backfill_cli_passes_title_slug_and_outputs_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env_file = write_env(tmp_path)
+    captured = {}
+
+    def fake_backfill(_session, **kwargs):
+        captured.update(kwargs)
+        data = {
+            "dry_run": not kwargs["apply"],
+            "profile_version": kwargs["profile_version"],
+            "limit": kwargs["limit"],
+            "batch_size": kwargs["batch_size"],
+            "selected": 2,
+            "processed": 0,
+            "skipped": 2,
+            "failed": 0,
+            "remaining": 0,
+        }
+        if kwargs["title_slug"] is not None:
+            data["title_slug"] = kwargs["title_slug"]
+        return SimpleNamespace(to_dict=lambda: data)
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_visual_intelligence_backfill", fake_backfill)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "visual",
+            "backfill",
+            "--title-slug",
+            "mi-otra-yo",
+            "--limit",
+            "20",
+            "--batch-size",
+            "5",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert captured["title_slug"] == "mi-otra-yo"
+    assert captured["limit"] == 20
+    assert captured["batch_size"] == 5
+    assert "TITLE_SLUG=mi-otra-yo" in output
+
+
+def test_visual_backfill_cli_json_includes_title_slug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env_file = write_env(tmp_path)
+
+    def fake_backfill(_session, **kwargs):
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "dry_run": not kwargs["apply"],
+                "profile_version": kwargs["profile_version"],
+                "limit": kwargs["limit"],
+                "batch_size": kwargs["batch_size"],
+                "selected": 0,
+                "processed": 0,
+                "skipped": 0,
+                "failed": 0,
+                "remaining": 0,
+                "title_slug": kwargs["title_slug"],
+            }
+        )
+
+    monkeypatch.setattr(asset_hub, "pilot_session_factory", lambda _url=None: sqlite_factory())
+    monkeypatch.setattr(asset_hub, "run_visual_intelligence_backfill", fake_backfill)
+
+    code = asset_hub.main(
+        [
+            "--env-file",
+            str(env_file),
+            "visual",
+            "backfill",
+            "--title-slug",
+            "mi-otra-yo",
+            "--json",
+        ]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert data["title_slug"] == "mi-otra-yo"
 
 
 def test_visual_reprocess_cli_passes_asset_ids(

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from pydantic import ValidationError
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -1775,6 +1775,174 @@ def test_visual_status_failed_is_current(
     assert data["pipeline"]["processed"] == 1
     assert data["pipeline"]["failed"] == 1
     assert data["pipeline"]["remaining"] == 1
+
+
+def test_visual_backfill_without_title_slug_keeps_unfiltered_selection(
+    session: Session,
+    source: Source,
+) -> None:
+    mi_otra_yo = make_asset(source, "mi-otra-yo-1")
+    mi_otra_yo.title_slug = "mi-otra-yo"
+    other = make_asset(source, "other-title")
+    other.title_slug = "otro-titulo"
+    generic = make_asset(source, "generic-title")
+    session.add_all([mi_otra_yo, other, generic])
+    session.commit()
+
+    ids = visual.select_visual_candidate_ids(session, limit=10)
+
+    assert ids == [mi_otra_yo.id, other.id, generic.id]
+
+
+def test_visual_backfill_title_slug_selects_only_requested_slug(
+    session: Session,
+    source: Source,
+) -> None:
+    first = make_asset(source, "mi-otra-yo-1")
+    first.title_slug = "mi-otra-yo"
+    second = make_asset(source, "mi-otra-yo-2")
+    second.title_slug = "mi-otra-yo"
+    other = make_asset(source, "other-title")
+    other.title_slug = "otro-titulo"
+    session.add_all([first, second, other])
+    session.commit()
+
+    ids = visual.select_visual_candidate_ids(session, limit=10, title_slug="mi-otra-yo")
+
+    assert ids == [first.id, second.id]
+
+
+def test_visual_backfill_other_title_slug_does_not_mix_assets(
+    session: Session,
+    source: Source,
+) -> None:
+    mi_otra_yo = make_asset(source, "mi-otra-yo")
+    mi_otra_yo.title_slug = "mi-otra-yo"
+    other = make_asset(source, "otro-titulo")
+    other.title_slug = "otro-titulo"
+    session.add_all([mi_otra_yo, other])
+    session.commit()
+
+    ids = visual.select_visual_candidate_ids(session, limit=10, title_slug="otro-titulo")
+
+    assert ids == [other.id]
+
+
+def test_visual_backfill_missing_title_slug_selects_zero_without_error(
+    session: Session,
+    source: Source,
+) -> None:
+    asset = make_asset(source, "mi-otra-yo")
+    asset.title_slug = "mi-otra-yo"
+    session.add(asset)
+    session.commit()
+
+    result = visual.run_visual_intelligence_backfill(session, title_slug="no-existe", limit=20, batch_size=5)
+
+    assert result.selected == 0
+    assert result.processed == 0
+    assert result.failed == 0
+    assert result.remaining == 0
+
+
+def test_visual_backfill_limit_is_applied_after_title_slug_filter(
+    session: Session,
+    source: Source,
+) -> None:
+    other = make_asset(source, "other-title")
+    other.title_slug = "otro-titulo"
+    first = make_asset(source, "mi-otra-yo-1")
+    first.title_slug = "mi-otra-yo"
+    second = make_asset(source, "mi-otra-yo-2")
+    second.title_slug = "mi-otra-yo"
+    third = make_asset(source, "mi-otra-yo-3")
+    third.title_slug = "mi-otra-yo"
+    session.add_all([other, first, second, third])
+    session.commit()
+
+    ids = visual.select_visual_candidate_ids(session, limit=2, title_slug="mi-otra-yo")
+
+    assert ids == [first.id, second.id]
+
+
+def test_visual_backfill_title_slug_still_excludes_current_visual_v1(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NVIDIA_VISUAL_MODEL", "test-model")
+    get_settings.cache_clear()
+    current = make_asset(source, "mi-otra-yo-current")
+    current.title_slug = "mi-otra-yo"
+    pending = make_asset(source, "mi-otra-yo-pending")
+    pending.title_slug = "mi-otra-yo"
+    session.add_all([current, pending])
+    session.flush()
+    session.add(
+        AssetAIAnalysis(
+            asset=current,
+            model="test-model",
+            provider="nvidia",
+            input_type="visual_intelligence",
+            prompt_version=VISUAL_PROFILE_VERSION,
+            result_json={"status": "ready", "source_fingerprint": visual.source_fingerprint(current)},
+        )
+    )
+    session.commit()
+
+    ids = visual.select_visual_candidate_ids(session, limit=10, title_slug="mi-otra-yo")
+
+    assert ids == [pending.id]
+
+
+def test_visual_backfill_title_slug_dry_run_does_not_persist(
+    session: Session,
+    source: Source,
+) -> None:
+    asset = make_asset(source, "mi-otra-yo-dry-run")
+    asset.title_slug = "mi-otra-yo"
+    session.add(asset)
+    session.commit()
+
+    result = visual.run_visual_intelligence_backfill(session, title_slug="mi-otra-yo", limit=20, batch_size=5)
+
+    assert result.dry_run is True
+    assert result.selected == 1
+    assert result.skipped == 1
+    assert session.scalar(select(func.count()).select_from(AssetAIAnalysis)) == 0
+
+
+def test_visual_backfill_apply_processes_only_requested_title_slug(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = make_asset(source, "mi-otra-yo-1")
+    first.title_slug = "mi-otra-yo"
+    second = make_asset(source, "mi-otra-yo-2")
+    second.title_slug = "mi-otra-yo"
+    other = make_asset(source, "other-title")
+    other.title_slug = "otro-titulo"
+    session.add_all([first, second, other])
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, first.id)
+
+    result = visual.run_visual_intelligence_backfill(
+        session,
+        title_slug="mi-otra-yo",
+        limit=20,
+        batch_size=5,
+        apply=True,
+        visual_caller=lambda _prompt, _frames: good_visual_result(),
+    )
+
+    analysis_asset_ids = set(session.scalars(select(AssetAIAnalysis.asset_id)))
+    assert result.selected == 2
+    assert result.processed == 2
+    assert result.failed == 0
+    assert analysis_asset_ids == {first.id, second.id}
+    assert other.id not in analysis_asset_ids
 
 
 def test_successful_visual_retry_clears_current_failed_status(

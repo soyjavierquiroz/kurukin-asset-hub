@@ -102,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     visual_backfill.add_argument("--batch-size", type=int, default=20)
     visual_backfill.add_argument("--apply", action="store_true")
     visual_backfill.add_argument("--force", action="store_true")
+    visual_backfill.add_argument("--title-slug")
     visual_backfill.add_argument("--profile-version", default=VISUAL_PROFILE_VERSION)
     visual_reprocess = visual_subparsers.add_parser("reprocess", parents=[common])
     visual_reprocess.add_argument("--asset-id", type=int, action="append", required=True)
@@ -295,6 +296,7 @@ def handle_visual(args: argparse.Namespace, session: Session) -> int:
             batch_size=args.batch_size,
             apply=args.apply,
             force=args.force,
+            title_slug=args.title_slug,
             profile_version=args.profile_version,
         )
         data = result.to_dict()
@@ -777,7 +779,7 @@ def visual_status_lines(data: dict[str, Any]) -> list[str]:
 
 
 def visual_backfill_lines(data: dict[str, Any]) -> list[str]:
-    return [
+    lines = [
         f"DRY_RUN={'YES' if data['dry_run'] else 'NO'}",
         f"PROFILE_VERSION={data['profile_version']}",
         f"LIMIT={data['limit'] if data['limit'] is not None else ''}",
@@ -788,6 +790,9 @@ def visual_backfill_lines(data: dict[str, Any]) -> list[str]:
         f"FAILED={data['failed']}",
         f"REMAINING={data['remaining']}",
     ]
+    if data.get("title_slug") is not None:
+        lines.insert(2, f"TITLE_SLUG={data['title_slug']}")
+    return lines
 
 
 def row_lines(rows: list[dict[str, Any]]) -> list[str]:
