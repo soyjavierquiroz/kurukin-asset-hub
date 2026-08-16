@@ -564,6 +564,117 @@ def test_visual_schema_validation_error_repairs_once_and_marks_ready(
     assert analysis.result_json["visual"]["garbage"]["subject_severely_out_of_frame"] is False
 
 
+def test_visual_invalid_json_repairs_once_and_marks_ready(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-invalid-json-repair")
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    prompts: list[str] = []
+
+    def invalid_json_then_valid(prompt: str, *_args, **_kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return '{"analysis_type":'
+        return good_visual_result().model_dump_json()
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("schema repair should not sleep"))
+    monkeypatch.setattr(visual, "post_chat_completion", invalid_json_then_valid)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert len(prompts) == 2
+    assert "The previous response was not valid JSON." in prompts[1]
+    assert "Return the COMPLETE visual-v1 JSON object only." in prompts[1]
+    assert "No markdown, no code fences, no commentary." in prompts[1]
+    assert analysis.result_json["status"] == "ready"
+    assert analysis.result_json["attempt_count"] == 2
+    assert analysis.result_json["final_error"] is None
+
+
+def test_visual_invalid_json_fails_retryable_after_one_repair(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-invalid-json-one-repair")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def invalid_json_payload(*_args, **_kwargs):
+        calls["count"] += 1
+        return '{"analysis_type":'
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("schema repair should not sleep"))
+    monkeypatch.setattr(visual, "post_chat_completion", invalid_json_payload)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 2
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["error_type"] == "operational_failure"
+    assert analysis.result_json["retryable"] is True
+    assert analysis.result_json["attempt_count"] == 2
+    assert analysis.result_json["final_error"] == "NVIDIA returned invalid visual-v1 JSON"
+    assert "visual" not in analysis.result_json
+    assert analyzed.editorial_status != "rejected"
+    assert analyzed.asset_uid == original_uid
+
+
+def test_visual_invalid_json_then_schema_invalid_fails_retryable_after_one_repair(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "provider-invalid-json-then-schema-invalid")
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    invalid = good_visual_result().model_dump(mode="json")
+    invalid["garbage"].pop("subject_severely_out_of_frame")
+    calls = {"count": 0}
+
+    def invalid_json_then_schema_invalid(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return '{"analysis_type":'
+        return json.dumps(invalid)
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("schema repair should not sleep"))
+    monkeypatch.setattr(visual, "post_chat_completion", invalid_json_then_schema_invalid)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert calls["count"] == 2
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["error_type"] == "operational_failure"
+    assert analysis.result_json["retryable"] is True
+    assert analysis.result_json["attempt_count"] == 2
+    assert "garbage.subject_severely_out_of_frame" in analysis.result_json["final_error"]
+    assert "visual" not in analysis.result_json
+    assert analyzed.editorial_status != "rejected"
+    assert analyzed.asset_uid == original_uid
+
+
 def test_visual_schema_validation_error_fails_retryable_after_one_repair_without_default(
     session: Session,
     source: Source,
@@ -667,6 +778,51 @@ def test_visual_schema_repair_reuses_cached_contact_sheet_without_rclone_or_ffmp
         return json.dumps(payloads[len(image_path_calls) - 1])
 
     monkeypatch.setattr(visual, "post_chat_completion", schema_then_valid)
+
+    analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
+
+    analysis = latest_analysis(session, analyzed)
+    assert analysis.result_json["status"] == "ready"
+    assert analysis.result_json["attempt_count"] == 2
+    assert image_path_calls == [[contact_sheet], [contact_sheet]]
+
+
+def test_visual_invalid_json_repair_reuses_cached_contact_sheet_without_rclone_or_ffmpeg(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(tmp_path / "previews"))
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    asset = make_asset(source, "invalid-json-repair-cache")
+    session.add(asset)
+    session.commit()
+    frame_dir = tmp_path / "previews" / str(asset.id) / "visual-v1-frames"
+    frames = write_frames(frame_dir, 10)
+    visual.write_visual_frame_manifest(frame_dir, VISUAL_PROFILE_VERSION, visual.source_fingerprint(asset), 11.0, frames)
+    contact_sheet = visual.ensure_visual_contact_sheet(frames, frame_dir)
+    image_path_calls: list[list[Path]] = []
+
+    monkeypatch.setattr(
+        visual.RcloneService,
+        "copyto",
+        lambda *_args, **_kwargs: pytest.fail("rclone should not run for cached JSON repair"),
+    )
+    monkeypatch.setattr(
+        visual,
+        "extract_temporal_frames",
+        lambda *_args, **_kwargs: pytest.fail("ffmpeg should not run for cached JSON repair"),
+    )
+
+    def invalid_json_then_valid(_prompt: str, image_paths: list[Path], *_args, **_kwargs):
+        image_path_calls.append(image_paths)
+        if len(image_path_calls) == 1:
+            return '{"analysis_type":'
+        return good_visual_result().model_dump_json()
+
+    monkeypatch.setattr(visual, "post_chat_completion", invalid_json_then_valid)
 
     analyzed = visual.analyze_asset_visual_intelligence(session, asset.id, force=True)
 
