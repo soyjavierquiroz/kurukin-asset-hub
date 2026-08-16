@@ -1,4 +1,5 @@
 import secrets
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -19,6 +20,18 @@ from app.services.asset_search import asset_matches_people_query, score_asset_fo
 from app.services.asset_selection import select_assets
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
+
+
+def detect_image_media_type(path: Path) -> str | None:
+    with path.open("rb") as file:
+        header = file.read(12)
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 class AssetSourcePolicySource(BaseModel):
@@ -338,7 +351,13 @@ def asset_thumbnail_preview(
     path = local_preview_file(asset.thumbnail_path)
     if path is None or not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview not found")
-    return FileResponse(path, media_type="image/jpeg")
+    media_type = detect_image_media_type(path)
+    if media_type is None:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Unsupported preview image type",
+        )
+    return FileResponse(path, media_type=media_type)
 
 
 @router.post("/{asset_id}/ai-enrich")

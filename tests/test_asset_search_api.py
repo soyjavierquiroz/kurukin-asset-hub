@@ -25,6 +25,8 @@ from app.services.asset_search import normalize_search_text, score_asset_for_que
 
 API_HEADERS = {"X-Asset-Hub-Api-Key": "test-api-key"}
 JPEG_BYTES = b"\xff\xd8\xff\xe0real-thumbnail\xff\xd9"
+PNG_BYTES = b"\x89PNG\r\n\x1a\nreal-thumbnail"
+WEBP_BYTES = b"RIFF\x10\x00\x00\x00WEBPVP8 real-thumbnail"
 
 
 def make_test_client() -> tuple[TestClient, sessionmaker[Session]]:
@@ -871,22 +873,36 @@ def seed_preview_api_asset(
     return asset
 
 
-def write_preview_thumbnail(pilot_root: Path, relative_path: str) -> Path:
+def write_preview_thumbnail(
+    pilot_root: Path,
+    relative_path: str,
+    content: bytes = JPEG_BYTES,
+) -> Path:
     path = pilot_root / relative_path.removeprefix("pilot-previews/")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(JPEG_BYTES)
+    path.write_bytes(content)
     return path
 
 
-def test_asset_preview_endpoint_serves_thumbnail_with_api_key(
+@pytest.mark.parametrize(
+    ("thumbnail_path", "content", "content_type"),
+    [
+        ("pilot-previews/preview-api-asset/not-a-jpeg.bin", JPEG_BYTES, "image/jpeg"),
+        ("pilot-previews/preview-api-asset/thumbnail.jpg", WEBP_BYTES, "image/webp"),
+        ("pilot-previews/preview-api-asset/thumbnail.png", PNG_BYTES, "image/png"),
+    ],
+)
+def test_asset_preview_endpoint_serves_thumbnail_with_detected_media_type(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    thumbnail_path: str,
+    content: bytes,
+    content_type: str,
 ) -> None:
     pilot_root = tmp_path / "pilot"
     monkeypatch.setenv("PILOT_PREVIEW_ROOT", str(pilot_root))
     get_settings.cache_clear()
-    thumbnail_path = "pilot-previews/preview-api-asset/thumbnail.jpg"
-    write_preview_thumbnail(pilot_root, thumbnail_path)
+    write_preview_thumbnail(pilot_root, thumbnail_path, content)
     client, session_factory = make_test_client()
     with session_factory() as session:
         seed_preview_api_asset(session, thumbnail_path=thumbnail_path)
@@ -894,8 +910,8 @@ def test_asset_preview_endpoint_serves_thumbnail_with_api_key(
     response = client.get("/api/assets/preview-api-asset/preview", headers=API_HEADERS)
 
     assert response.status_code == 200
-    assert response.content == JPEG_BYTES
-    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == content
+    assert response.headers["content-type"] == content_type
 
 
 def test_asset_preview_endpoint_requires_api_key() -> None:
