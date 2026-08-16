@@ -769,6 +769,30 @@ def normalize_visual_payload(payload: Any) -> tuple[Any, list[str]]:
         return payload, []
     normalized = deepcopy(payload)
     warnings: list[str] = []
+    semantics = normalized.get("semantics")
+    if isinstance(semantics, dict) and "visible_text" in semantics:
+        visible_text = semantics.get("visible_text")
+        if isinstance(visible_text, str):
+            semantics["visible_text"] = visible_text.strip()
+        elif isinstance(visible_text, list):
+            clean_text_items: list[str] = []
+            seen_text_items: set[str] = set()
+            for item in visible_text:
+                if not isinstance(item, str):
+                    continue
+                clean_item = item.strip()
+                if not clean_item or clean_item in seen_text_items:
+                    continue
+                clean_text_items.append(clean_item)
+                seen_text_items.add(clean_item)
+            semantics["visible_text"] = (
+                " | ".join(clean_text_items) if clean_text_items else None
+            )
+            warnings.append("semantics.visible_text_list_normalized")
+        elif visible_text is not None:
+            semantics["visible_text"] = None
+            warnings.append("semantics.visible_text_invalid_dropped")
+
     composition = normalized.get("composition")
     if isinstance(composition, dict):
         subject_region = composition.get("subject_region")
@@ -1340,6 +1364,8 @@ def build_visual_intelligence_prompt(
         "- quality.score combina nitidez, exposicion, estabilidad, iluminacion y consistencia temporal.\n"
         "- garbage.score mide probabilidad de asset inutil: negro, corrupto, borroso extremo o captura accidental.\n"
         "- semantics resume sujeto, accion, entorno, mood, texto visible, logos y keywords buscables.\n"
+        "- semantics.visible_text debe ser un unico string con todo el texto legible relevante o null. "
+        "Si hay varios textos, unelos en ese string; nunca devuelvas array.\n"
         "- garbage contiene senales estructuradas de inutilidad editorial; usa confidence global para calibrarlas.\n"
         "- confidence global es REQUIRED float 0.0..1.0 y debe calibrar la evaluacion visual completa.\n"
         "- composition evalua encuadre, posicion del sujeto, trayectoria opcional, suitability vertical/horizontal, movimiento de camara y zonas seguras de texto.\n"

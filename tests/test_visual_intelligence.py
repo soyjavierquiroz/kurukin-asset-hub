@@ -1567,6 +1567,108 @@ def test_visual_payload_normalizes_subject_region_string_to_null() -> None:
     assert warnings == ["composition.subject_region_dropped"]
 
 
+def test_visual_payload_visible_text_string_is_stripped_and_kept() -> None:
+    payload = good_visual_result(visible_text="  Cafe  ").model_dump(mode="json")
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.semantics.visible_text == "Cafe"
+    assert warnings == []
+
+
+def test_visual_payload_visible_text_list_is_joined_in_order() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["semantics"]["visible_text"] = ["OBANDO", "06", "tigo"]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.semantics.visible_text == "OBANDO | 06 | tigo"
+    assert warnings == ["semantics.visible_text_list_normalized"]
+
+
+def test_visual_payload_visible_text_list_drops_empty_strings_and_duplicates() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["semantics"]["visible_text"] = [
+        " OBANDO ",
+        "",
+        "06",
+        "OBANDO",
+        "  ",
+        "tigo",
+        "06",
+    ]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.semantics.visible_text == "OBANDO | 06 | tigo"
+    assert warnings == ["semantics.visible_text_list_normalized"]
+
+
+def test_visual_payload_visible_text_empty_list_becomes_null() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["semantics"]["visible_text"] = []
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.semantics.visible_text is None
+    assert warnings == ["semantics.visible_text_list_normalized"]
+
+
+def test_visual_payload_visible_text_invalid_type_becomes_null_with_warning() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["semantics"]["visible_text"] = {"text": "OBANDO"}
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.semantics.visible_text is None
+    assert warnings == ["semantics.visible_text_invalid_dropped"]
+
+
+def test_visual_payload_complete_asset_validates_with_visible_text_list() -> None:
+    payload = good_visual_result().model_dump(mode="json")
+    payload["semantics"]["visible_text"] = [
+        "OBANDO",
+        "06",
+        "tigo",
+        "SPORTS",
+        "LIGA PROM",
+    ]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+
+    assert result.semantics.visible_text == "OBANDO | 06 | tigo | SPORTS | LIGA PROM"
+    assert result.quality.score == 0.82
+    assert warnings == ["semantics.visible_text_list_normalized"]
+
+
+def test_visual_payload_normalized_visible_text_list_still_blocks_flip(source: Source) -> None:
+    payload = good_visual_result(
+        flip_allowed=True,
+        flip_risk_reasons=[],
+        flip_confidence=0.96,
+    ).model_dump(mode="json")
+    payload["semantics"]["visible_text"] = ["OBANDO", "06"]
+
+    normalized, warnings = visual.normalize_visual_payload(payload)
+    result = VisualIntelligenceResult.model_validate(normalized)
+    transforms = visual.normalize_visual_transforms(
+        result,
+        make_asset(source, "visible-text-list-blocker"),
+    )
+
+    assert result.semantics.visible_text == "OBANDO | 06"
+    assert transforms.flip_horizontal.status == "unsafe"
+    assert transforms.flip_horizontal.allowed is False
+    assert "visible_text" in transforms.flip_horizontal.blockers
+    assert warnings == ["semantics.visible_text_list_normalized"]
+
+
 def test_visual_payload_normalizes_subject_trajectory_strings_to_empty() -> None:
     payload = good_visual_result().model_dump(mode="json")
     payload["composition"]["subject_trajectory"] = ["caminar", "girar"]
