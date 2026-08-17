@@ -2001,6 +2001,93 @@ def test_visual_backfill_apply_processes_only_requested_title_slug(
     assert other.id not in analysis_asset_ids
 
 
+def test_visual_backfill_apply_invalid_json_repairs_once_and_marks_ready(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "backfill-invalid-json-repair")
+    asset.title_slug = "mi-otra-yo"
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    prompts: list[str] = []
+
+    def invalid_json_then_valid(prompt: str, *_args, **_kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return '{"analysis_type":'
+        return good_visual_result().model_dump_json()
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("schema repair should not sleep"))
+    monkeypatch.setattr(visual, "post_chat_completion", invalid_json_then_valid)
+
+    result = visual.run_visual_intelligence_backfill(
+        session,
+        title_slug="mi-otra-yo",
+        limit=20,
+        batch_size=5,
+        apply=True,
+    )
+
+    analysis = latest_analysis(session, asset)
+    assert len(prompts) == 2
+    assert "The previous response was not valid JSON." in prompts[1]
+    assert result.selected == 1
+    assert result.processed == 1
+    assert result.failed == 0
+    assert analysis.result_json["status"] == "ready"
+    assert analysis.result_json["attempt_count"] == 2
+    assert analysis.result_json["final_error"] is None
+
+
+def test_visual_backfill_apply_invalid_json_fails_retryable_after_one_repair(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset = make_asset(source, "backfill-invalid-json-one-repair")
+    asset.title_slug = "mi-otra-yo"
+    original_uid = asset.asset_uid
+    session.add(asset)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, asset.id)
+    calls = {"count": 0}
+
+    def invalid_json_payload(*_args, **_kwargs):
+        calls["count"] += 1
+        return '{"analysis_type":'
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(visual.time, "sleep", lambda _seconds: pytest.fail("schema repair should not sleep"))
+    monkeypatch.setattr(visual, "post_chat_completion", invalid_json_payload)
+
+    result = visual.run_visual_intelligence_backfill(
+        session,
+        title_slug="mi-otra-yo",
+        limit=20,
+        batch_size=5,
+        apply=True,
+    )
+
+    analysis = latest_analysis(session, asset)
+    assert calls["count"] == 2
+    assert result.selected == 1
+    assert result.processed == 1
+    assert result.failed == 1
+    assert analysis.result_json["status"] == "failed"
+    assert analysis.result_json["retryable"] is True
+    assert analysis.result_json["attempt_count"] == 2
+    assert analysis.result_json["final_error"] == "NVIDIA returned invalid visual-v1 JSON"
+    assert "visual" not in analysis.result_json
+    assert asset.asset_uid == original_uid
+
+
 def test_visual_backfill_apply_limit_controls_total_selection_across_chunks(
     session: Session,
     source: Source,

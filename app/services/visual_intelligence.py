@@ -756,22 +756,7 @@ def call_nvidia_visual_intelligence(
     try:
         result, normalization_warnings = validate_visual_payload_text(text)
     except (VisualPayloadJSONError, ValidationError) as exc:
-        if isinstance(exc, ValidationError):
-            repair_prompt = (
-                prompt
-                + "\n\nThe previous response failed schema validation.\n"
-                + "Return the COMPLETE JSON object again.\n"
-                + "Do not omit required fields.\n"
-                + "Validation problems:\n"
-                + summarize_pydantic_errors(exc)
-            )
-        else:
-            repair_prompt = (
-                prompt
-                + "\n\nThe previous response was not valid JSON.\n"
-                + "Return the COMPLETE visual-v1 JSON object only.\n"
-                + "No markdown, no code fences, no commentary."
-            )
+        repair_prompt = build_visual_payload_repair_prompt(prompt, exc)
         try:
             text, attempt_count = post_visual_completion_with_retries(
                 repair_prompt,
@@ -780,26 +765,57 @@ def call_nvidia_visual_intelligence(
                 attempt_count,
             )
             result, normalization_warnings = validate_visual_payload_text(text)
-        except ValidationError as repair_exc:
-            error = VisualIntelligenceOperationalError("NVIDIA returned visual-v1 JSON that failed schema validation")
-            object.__setattr__(error, "_visual_attempt_count", attempt_count)
-            object.__setattr__(error, "_visual_final_error", summarize_pydantic_errors(repair_exc))
-            object.__setattr__(error, "_visual_retryable", True)
+        except (VisualPayloadJSONError, ValidationError) as repair_exc:
+            error = visual_payload_repair_exhausted_error(repair_exc, attempt_count)
             raise error from repair_exc
-        except VisualPayloadJSONError as repair_exc:
-            error = VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON")
-            object.__setattr__(error, "_visual_attempt_count", attempt_count)
-            object.__setattr__(error, "_visual_final_error", sanitize_provider_error(str(repair_exc)))
-            object.__setattr__(error, "_visual_retryable", True)
-            raise error from repair_exc
-        except Exception as repair_exc:
-            raise VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON") from repair_exc
     except Exception as exc:
-        raise VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON") from exc
+        if hasattr(exc, "_visual_attempt_count"):
+            raise
+        error = VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON")
+        object.__setattr__(error, "_visual_attempt_count", attempt_count)
+        object.__setattr__(error, "_visual_final_error", sanitize_provider_error(str(exc)))
+        raise error from exc
     object.__setattr__(result, "_normalization_warnings", normalization_warnings)
     object.__setattr__(result, "_attempt_count", attempt_count)
     object.__setattr__(result, "_final_error", None)
     return result
+
+
+def build_visual_payload_repair_prompt(
+    prompt: str,
+    exc: VisualPayloadJSONError | ValidationError,
+) -> str:
+    if isinstance(exc, ValidationError):
+        return (
+            prompt
+            + "\n\nThe previous response failed schema validation.\n"
+            + "Return the COMPLETE JSON object again.\n"
+            + "Do not omit required fields.\n"
+            + "Validation problems:\n"
+            + summarize_pydantic_errors(exc)
+        )
+    return (
+        prompt
+        + "\n\nThe previous response was not valid JSON.\n"
+        + "Return the COMPLETE visual-v1 JSON object only.\n"
+        + "No markdown, no code fences, no commentary."
+    )
+
+
+def visual_payload_repair_exhausted_error(
+    exc: VisualPayloadJSONError | ValidationError,
+    attempt_count: int,
+) -> VisualIntelligenceOperationalError:
+    if isinstance(exc, ValidationError):
+        error = VisualIntelligenceOperationalError("NVIDIA returned visual-v1 JSON that failed schema validation")
+        final_error = summarize_pydantic_errors(exc)
+    else:
+        error = VisualIntelligenceOperationalError("NVIDIA returned invalid visual-v1 JSON")
+        final_error = sanitize_provider_error(str(exc))
+    object.__setattr__(error, "_visual_attempt_count", attempt_count)
+    object.__setattr__(error, "_visual_final_error", final_error)
+    object.__setattr__(error, "_visual_retryable", True)
+    return error
 
 
 def post_visual_completion_with_retries(
