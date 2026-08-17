@@ -1912,6 +1912,62 @@ def test_visual_backfill_title_slug_dry_run_does_not_persist(
     assert session.scalar(select(func.count()).select_from(AssetAIAnalysis)) == 0
 
 
+@pytest.mark.parametrize(
+    ("limit", "batch_size", "expected_selected"),
+    [(20, 5, 20), (7, 3, 7), (3, 10, 3)],
+)
+def test_visual_backfill_dry_run_limit_controls_total_selection(
+    session: Session,
+    source: Source,
+    limit: int,
+    batch_size: int,
+    expected_selected: int,
+) -> None:
+    assets = [make_asset(source, f"dry-run-unscoped-{index:02d}") for index in range(25)]
+    session.add_all(assets)
+    session.commit()
+
+    result = visual.run_visual_intelligence_backfill(session, limit=limit, batch_size=batch_size)
+
+    assert result.dry_run is True
+    assert result.selected == expected_selected
+    assert result.processed == 0
+    assert result.skipped == expected_selected
+
+
+@pytest.mark.parametrize(
+    ("limit", "batch_size", "expected_selected"),
+    [(20, 5, 20), (7, 3, 7), (3, 10, 3)],
+)
+def test_visual_backfill_title_slug_dry_run_limit_controls_total_selection(
+    session: Session,
+    source: Source,
+    limit: int,
+    batch_size: int,
+    expected_selected: int,
+) -> None:
+    scoped_assets = [make_asset(source, f"dry-run-mi-otra-yo-{index:02d}") for index in range(25)]
+    for asset in scoped_assets:
+        asset.title_slug = "mi-otra-yo"
+    other_assets = [make_asset(source, f"dry-run-other-{index:02d}") for index in range(25)]
+    for asset in other_assets:
+        asset.title_slug = "otro-titulo"
+    session.add_all(scoped_assets + other_assets)
+    session.commit()
+
+    result = visual.run_visual_intelligence_backfill(
+        session,
+        title_slug="mi-otra-yo",
+        limit=limit,
+        batch_size=batch_size,
+    )
+
+    assert result.dry_run is True
+    assert result.selected == expected_selected
+    assert result.processed == 0
+    assert result.skipped == expected_selected
+
+
 def test_visual_backfill_apply_processes_only_requested_title_slug(
     session: Session,
     source: Source,
@@ -1943,6 +1999,38 @@ def test_visual_backfill_apply_processes_only_requested_title_slug(
     assert result.failed == 0
     assert analysis_asset_ids == {first.id, second.id}
     assert other.id not in analysis_asset_ids
+
+
+def test_visual_backfill_apply_limit_controls_total_selection_across_chunks(
+    session: Session,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    assets = [make_asset(source, f"apply-limit-{index:02d}") for index in range(25)]
+    session.add_all(assets)
+    session.commit()
+    patch_frame_collection(monkeypatch, tmp_path, assets[0].id)
+    calls = 0
+
+    def visual_caller(_prompt: str, _frames: list[Path]) -> VisualIntelligenceResult:
+        nonlocal calls
+        calls += 1
+        return good_visual_result()
+
+    result = visual.run_visual_intelligence_backfill(
+        session,
+        limit=20,
+        batch_size=5,
+        apply=True,
+        visual_caller=visual_caller,
+    )
+
+    assert result.selected == 20
+    assert result.processed == 20
+    assert result.failed == 0
+    assert calls == 20
+    assert session.scalar(select(func.count()).select_from(AssetAIAnalysis)) == 20
 
 
 def test_successful_visual_retry_clears_current_failed_status(

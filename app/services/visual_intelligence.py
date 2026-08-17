@@ -265,9 +265,13 @@ def run_visual_intelligence_backfill(
             break
         seen_asset_ids.update(ids)
         selected += len(ids)
+        if remaining_limit is not None:
+            remaining_limit -= len(ids)
         if not apply:
             skipped += len(ids)
-            break
+            if remaining_limit is None or remaining_limit <= 0:
+                break
+            continue
         for asset_id in ids:
             before = session.get(Asset, asset_id)
             try:
@@ -290,8 +294,6 @@ def run_visual_intelligence_backfill(
                     failed += 1
             else:
                 skipped += 1
-        if remaining_limit is not None:
-            remaining_limit -= len(ids)
 
     return VisualBackfillResult(
         dry_run=not apply,
